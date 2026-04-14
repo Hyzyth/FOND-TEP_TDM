@@ -34,11 +34,13 @@ if [ -f $requirements_path ]; then
 else
     echo "Requirements file not found!"
 fi
-
+##################################################################
+# ADRESSES DES DOSSIERS A DEFINIR SELON VOTRE STRUCTURE DE FICHIERS
+##################################################################
 PPDATA_FOLDER=/data/santiago/Datast001_HECKTOR_SwinCross/
 RAWDATA_FOLDER=/home/santiago/HECKTOR_data/Task_1_segmentation/
-INFERENCE_OUTPUT_FOLDER=/data/santiago/Datast001_HECKTOR_SwinCross_2000ep_res/
-MODEL_DIR=hecktor_1gpu_2000ep_run/ 
+INFERENCE_OUTPUT_FOLDER=/data/ethan/Datast001_HECKTOR_2025_SwinCross_2000ep_predictions/
+MODEL_DIR=hecktor_1gpu_2000ep_run/
 
 ##################################################################
 # #Step 1 : Preprocess HECKTOR dataset to swincross format
@@ -49,8 +51,10 @@ MODEL_DIR=hecktor_1gpu_2000ep_run/
 ##################################################################
 #Step 2 : Train the model
 ##################################################################
-#use both GPU 0 and 1 for training
+##### No checkpoint loading
+# Use both GPU 0 and 1 for training
 # Note : Multiple GPU training currently not working. Try adding huggingface accelerator lib if later use is necessary
+#######################################################################################################################
 # CUDA_VISIBLE_DEVICES=0,1 torchrun \
 #     --nproc_per_node=2 \
 #     train.py \
@@ -64,29 +68,88 @@ MODEL_DIR=hecktor_1gpu_2000ep_run/
 #     --save_checkpoint \
 #     --logdir $MODEL_DIR \
 
-#use only GPU 0 for training
-CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3.12 -u train.py \
+# Use only GPU 0 for training
+###############################
+# CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3.12 -u train.py \
+#     --data_dir $PPDATA_FOLDER \
+#     --batch_size 2 \
+#     --max_epochs 2000 \
+#     --val_every 20 \
+#     --warmup_epochs 25 \
+#     --workers 4 \
+#     --cache_rate 1.0 \
+#     --infer_overlap 0.25 \
+#     --save_checkpoint \
+#     --logdir $MODEL_DIR \
+#    > ./runs/$MODEL_DIR/training_debug.log 2>&1 # redirecting stdout and stderr to a log file. excellent if model crashes
+
+##### Checkpoint Loading
+# Continue training from best_model.pth in $MODEL_DIR epoch 640 DSC='0.51',  epoch 100 DSC=0.46 
+##############################################################
+CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    python3.12 -u train.py \
     --data_dir $PPDATA_FOLDER \
+    --checkpoint ./runs/hecktor_1gpu_2000ep_run/model_best.pth \
     --batch_size 2 \
     --max_epochs 2000 \
     --val_every 20 \
-    --warmup_epochs 25 \
+    --warmup_epochs 0 \
     --workers 4 \
     --cache_rate 1.0 \
+    --infer_overlap 0.25 \
     --save_checkpoint \
+    --noamp \
     --logdir $MODEL_DIR \
-   > ./runs/$MODEL_DIR/training_debug.log 2>&1 # redirecting stdout and stderr to a log file. excellent if model crashes
+   > ./runs/$MODEL_DIR/training_continue_debug.log 2>&1 # redirecting stdout and stderr to a log file. excellent if model crashes
+   
 
 # testing single GPU training for error handling with all HECKTOR data
-# CUDA_VISIBLE_DEVICES=0 python3.12 train.py \
+######################################################################
+# CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3.12 -u train.py \
 #     --data_dir $PPDATA_FOLDER \
 #     --batch_size 2 \
 #     --max_epochs 5 \
-#     --val_every 1 \
+#     --val_every 2 \
 #     --warmup_epochs 1 \
-#     --workers 0 \
-#     --cache_rate 0.0 \
-#     --logdir test_single_gpu \
+#     --workers 4 \
+#     --cache_rate 1.0 \
+#     --infer_overlap 0.25 \
+#     --save_checkpoint \
+#     --logdir $MODEL_DIR \
+#    > ./runs/$MODEL_DIR/inference_debug.log 2>&1 # redirecting stdout and stderr to a log file. excellent if model crashes
+
+# testing single GPU VRAM stress test with all HECKTOR data and 10 epochs to check for memory leaks and VRAM usage
+##################################################################################################################
+# CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3.12 -u train.py \
+#     --data_dir $PPDATA_FOLDER \
+#     --batch_size 2 \
+#     --max_epochs 10 \
+#     --val_every 1 \
+#     --warmup_epochs 10 \
+#     --workers 4 \
+#     --cache_rate 1.0 \
+#     --infer_overlap 0.25 \
+#     --save_checkpoint \
+#     --logdir test_VRAM \
+#    > ./runs/test_VRAM/training_debug.log 2>&1 # redirecting stdout and stderr to a log file. excellent if model crashes
+   
+# testing single GPU VRAM stress and checkpoint retrieval with all HECKTOR data : 3 epochs val_every epoch 
+##################################################################################################################
+# CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3.12 -u train.py \
+#     --data_dir $PPDATA_FOLDER \
+#     --checkpoint ./runs/hecktor_1gpu_2000ep_run/model_best.pth \
+#     --batch_size 2 \
+#     --max_epochs 103 \
+#     --val_every 1 \
+#     --warmup_epochs 3 \
+#     --workers 4 \
+#     --cache_rate 1.0 \
+#     --infer_overlap 0.25 \
+#     --noamp \
+#     --save_checkpoint \
+#     --logdir test_chkptload_VRAMstress \
+#    > ./runs/test_chkptload_VRAMstress/training_debug.log 2>&1 # redirecting stdout and stderr to a log file. excellent if model crashes
+   
 
 ##################################################################
 #Step 3 : Run inference
@@ -105,5 +168,10 @@ CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3.
 ##################################################################
 #Step 4 : Postprocess and evaluate results
 ##################################################################
-# save graphics of training evolution
-# uv run export_graphics.py --logdir ./runs/$MODEL_DIR --output_dir ./runs/$MODEL_DIR/training_graphics/
+
+## save graphics of training evolution
+# uv run export_graphs.py --logdir ./runs/$MODEL_DIR --output ./runs/$MODEL_DIR/training_graphics/
+# uv run export_graphs.py --logdir ./runs/hecktor_1gpu_2000ep_run/ --output ./runs/hecktor_1gpu_2000ep_run/training_graphics/
+
+##save continuous graphics
+# uv run export_graphs.py --logdir ./runs/hecktor_1gpu_2000ep_run/ --output ./runs/hecktor_1gpu_2000ep_run/training_graphics_continuous --continuous
