@@ -283,7 +283,8 @@ def get_loader(args):
                                        num_workers=args.workers,
                                        sampler=train_sampler,
                                        pin_memory=True,
-                                       persistent_workers=(args.workers > 0))
+                                       #persistent_workers=(args.workers > 0)
+                                       )
 
         # MODIFICATION: Using ThreadDataLoader for training to reduce epoch time
         # train_loader = ThreadDataLoader(train_ds,
@@ -305,7 +306,8 @@ def get_loader(args):
                                      num_workers=args.workers,
                                      sampler=val_sampler,
                                      pin_memory=True,
-                                     persistent_workers=(args.workers > 0))
+                                     #persistent_workers=(args.workers > 0)
+                                     )
         loader = [train_loader, val_loader]
 
     return loader

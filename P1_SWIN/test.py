@@ -9,27 +9,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import os
-import torch
+import warnings
+import nibabel as nib
 import numpy as np
 import SimpleITK as sitk
+import torch
 from scipy import ndimage
-from monai.inferers.utils import sliding_window_inference # modification : changed import path as per VSCode suggestion monai.inferers -> monai.inferers.utils
-import nibabel as nib
-from data_utils import get_loader # Modification: Change the reference to the .py in the root with the code changes. Original version stays in utils folder
-from trainer import dice
-import argparse
+from monai.data import MetaTensor, decollate_batch
+from monai.inferers.utils import sliding_window_inference
+from monai.transforms import Invertd
+from data_utils import get_loader
 from networks.SwinTransModels import CONFIGS as CONFIGS_sw_seg
 from networks.SwinTransModels import *
-import warnings
-
-# Recursion limit was set for deprecated connected components counting functions
-#import sys
-#print(sys.getrecursionlimit())
-# sys.setrecursionlimit(99999) 
-#print(sys.getrecursionlimit())
-
+from trainer import dice
 warnings.filterwarnings("ignore")
+
 parser = argparse.ArgumentParser(description='UNETR segmentation pipeline')
 parser.add_argument('--pretrained_dir', default='./runs/for_log/', type=str, help='pretrained checkpoint directory')
 parser.add_argument('--output_dir', default=None, type=str, help='output directory for test results')
@@ -65,129 +61,27 @@ parser.add_argument('--RandScaleIntensityd_prob', default=0.1, type=float, help=
 parser.add_argument('--RandShiftIntensityd_prob', default=0.1, type=float, help='RandShiftIntensityd aug probability')
 parser.add_argument('--pos_embed', default='perceptron', type=str, help='type of position embedding')
 parser.add_argument('--norm_name', default='instance', type=str, help='normalization layer type in decoder')
-parser.add_argument(
-    '--inference_only',
-    action='store_true',
-    help='Run pure inference without ground truth (no Dice, no metrics)'
-) # Sa simple présence sans valeur indique True, son absence indique false
+parser.add_argument('--inference_only', action='store_true', help='Run pure inference without ground truth (no Dice, no metrics)') # Sa simple présence sans valeur indique True, son absence indique false
 
-# Deprecated : Inefficient and incorrect way to count connected components.
-# def count_objects(image):
-#     width, height, depth = image.shape[0], image.shape[1], image.shape[2]
-#     objects_members = [(x, y, z) for x in range(width) for y in range(height) for z in range(depth) if image[y][x][z] == 1]
-#     objects_count = 0
-#     while objects_members != []:
-#        remove_object(objects_members, objects_members.pop(0))
-#        objects_count += 1
-#     return objects_count
-# def remove_object(objects_members, start_point):
-#     x, y ,z = start_point
-#     connex = [(x, y + 1,z+1), (x - 1, y, z), (x, y - 1,z),(x, y + 1,z-1),
-#               (x + 1, y, z), (x, y + 1,z)]
-#     for point in connex:
-#         try:
-#             objects_members.remove(point)
-#             remove_object(objects_members, point)
-#         except ValueError:
-#             pass
-
-# NEW MOD > Replace the count_objects and remove_object functions with:
-## Mathieu comment : you could use the simpleITK method "connected components" to perform this operation
-
-def count_objects(image, target_value=1):
-    """Count connected components using scipy (much faster and correct)"""
-    binary_mask = (image == target_value).astype(np.uint8)
-    labeled_array, num_features = ndimage.label(binary_mask)
+def count_objects(image, target_value=1): 
+    '''
+    Description:
+        Compte le nombre d'objets distincts dans un volume 3D en utilisant une approche de composantes connexes. 
+        Un objet est défini comme un ensemble de voxels connectés ayant la même valeur cible (ex: 1 pour les tumeurs). 
+        La fonction utilise une structure de connectivité complète pour s'assurer que tous les voxels 
+        adjacents sont considérés comme faisant partie du même objet.
+    
+    :param image: Description
+        volume 3D (numpy array) dans lequel on veut compter les objets
+    :param target_value: Description
+        valeur dans le volume qui correspond à l'objet à compter (ex: 1 pour les tumeurs, 2 pour les nodules)
+    :return: Description
+        nombre d'objets distincts dans le volume correspondant à la valeur cible
+    '''
+    binary_mask = (image == target_value) 
+    structure = ndimage.generate_binary_structure(image.ndim, image.ndim) # full connectivity 
+    _, num_features = ndimage.label(binary_mask, structure=structure) 
     return num_features
-
-
-def create_prediction_sitk_with_metadata(prediction_np, original_image_path, spacing=(1.0, 1.0, 1.0), monai_affine=None):
-    """
-    Version V2 (Fix Image Noire) avec DEBUG LOGS : 
-    On utilise la direction Identité (1.0) au lieu de RAS (-1.0) pour que l'origine
-    de MONAI ne pousse pas l'image hors du champ du patient.
-    """
-    print("\n" + "="*50)
-    print("[DEBUG] START: create_prediction_sitk_with_metadata")
-    print(f"[DEBUG] Input Prediction shape (Numpy): {prediction_np.shape}")
-    
-    # --- Step 1: Transpose (Match SimpleITK Z,Y,X to X,Y,Z) ---
-    prediction_np = prediction_np.transpose(2, 1, 0)
-    print(f"[DEBUG] Transposed shape (SITK X,Y,Z): {prediction_np.shape}")
-    
-    prediction_sitk = sitk.GetImageFromArray(prediction_np)
-    prediction_sitk.SetSpacing(spacing)
-
-    # --- CORRECTION V2 : Direction IDENTITÉ ---
-    # On tente l'identité (1.0) car l'origine MONAI semble déjà compenser le RAS.
-    # Cela évite d'envoyer l'image à -900mm.
-    ras_direction = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
-    prediction_sitk.SetDirection(ras_direction)
-    
-    # --- Gestion de l'Origine ---
-    if monai_affine is not None:
-        origin = (float(monai_affine[0, 3]), float(monai_affine[1, 3]), float(monai_affine[2, 3]))
-        prediction_sitk.SetOrigin(origin)
-        print(f"[DEBUG] Origin set from MONAI affine: {origin}")
-    else:
-        prediction_sitk.SetOrigin((0.0, 0.0, 0.0))
-        print("[DEBUG] WARNING: No MONAI affine found, Origin set to (0,0,0)")
-
-    # LOG: Vérification
-    print(f"[DEBUG] >> Intermediate Image Configuration:")
-    print(f"         Direction: {prediction_sitk.GetDirection()}")
-    print(f"         Origin:    {prediction_sitk.GetOrigin()}")
-
-    # S'il n'y a pas d'image de référence
-    if original_image_path is None or not os.path.exists(original_image_path):
-        print("⚠️ [DEBUG] No reference found. Returning image directly.")
-        return prediction_sitk
-
-    # --- Step 2: Chargement de la Référence (LPS) ---
-    print(f"[DEBUG] Loading Reference: {original_image_path}")
-    full_ref = sitk.ReadImage(original_image_path)
-    
-    if full_ref.GetDimension() == 4:
-        size_4d = list(full_ref.GetSize())
-        reference_image = sitk.Extract(full_ref, [size_4d[0], size_4d[1], size_4d[2], 0], [0, 0, 0, 0])
-    else:
-        reference_image = full_ref
-
-    # --- COMPARISON CHECK ---
-    center_pred = prediction_sitk.TransformContinuousIndexToPhysicalPoint(
-        [sz/2.0 for sz in prediction_sitk.GetSize()]
-    )
-    center_ref = reference_image.TransformContinuousIndexToPhysicalPoint(
-        [sz/2.0 for sz in reference_image.GetSize()]
-    )
-    dist_centers = np.linalg.norm(np.array(center_pred) - np.array(center_ref))
-    print(f"[DEBUG] Physical Center check:")
-    print(f"         Pred Center: {center_pred}")
-    print(f"         Ref Center:  {center_ref}")
-    print(f"         Distance: {dist_centers:.2f} mm")
-    
-    # Si la distance est petite, c'est gagné !
-    if dist_centers < 50.0:
-        print("✅ [DEBUG] Centers are close! Resampling should work perfectly.")
-    else:
-        print("⚠️ [DEBUG] WARNING: Distance is still large. Check Origin coordinates.")
-
-    # --- Step 3: Rééchantillonnage ---
-    print(f"[DEBUG] Starting ResampleImageFilter...")
-    
-    resampler = sitk.ResampleImageFilter()
-    resampler.SetReferenceImage(reference_image) 
-    resampler.SetInterpolator(sitk.sitkNearestNeighbor)
-    resampler.SetDefaultPixelValue(0)
-    resampler.SetOutputPixelType(sitk.sitkUInt8)
-    
-    prediction_final = resampler.Execute(prediction_sitk)
-    
-    print(f"[DEBUG] Resampling Done.")
-    print("[DEBUG] END: create_prediction_sitk_with_metadata")
-    print("="*50 + "\n")
-    
-    return prediction_final
 
 def main():
     args = parser.parse_args()
@@ -222,7 +116,7 @@ def main():
                 os.makedirs(output_dir)
                 print("Created output directory: {}".format(output_dir))
 
-        # FIX: Use os.path.join for proper path handling
+        # Define test output directory (use pretrained_dir/test if output_dir is not provided)
         test_output_dir = output_dir if output_dir != None else os.path.join(pretrained_dir, 'test')
 
         if not os.path.exists(test_output_dir):
@@ -231,16 +125,9 @@ def main():
         for i, batch in enumerate(val_loader):
 
             val_inputs = batch["image"].to(device)
-            val_labels = batch["label"].to(device) if not args.inference_only else None # If inference only, we do not need 'label's, it even doesn't exist...
+            val_labels = batch["label"].to(device) if not args.inference_only else None # If inference only, we do not need 'label's, it doesn't even exist...
             
-            #this was here before my changes
-            #val_inputs = val_inputs[:,1,:,:,:]
-            #val_inputs = torch.unsqueeze(val_inputs,1)
-
-            # OLD (deprecated):
-            # img_name = batch['image_meta_dict']['filename_or_obj'][0].split('/')[-1]
-            
-            # NMODIFICATION > NEW (MONAI 1.5+ compatible):
+            # MODIFICATION > NEW (MONAI 1.5+ compatible):
             # Try multiple ways to get the filename for compatibility
             if hasattr(val_inputs, 'meta') and 'filename_or_obj' in val_inputs.meta:
                 img_name = val_inputs.meta['filename_or_obj'][0].split('/')[-1]
@@ -260,88 +147,101 @@ def main():
                                                    model,
                                                    overlap=args.infer_overlap)
             print("Debug : After inference on case {}".format(img_name))
-            val_outputs = torch.softmax(val_outputs, 1).cpu().numpy()
-            val_outputs = np.argmax(val_outputs, axis=1).astype(np.uint8)
 
+            # --- 1. PREPARATION DES PREDICTIONS (Tenseur pour MONAI) ---
+            val_outputs_tensor = torch.softmax(val_outputs, dim=1)
+            val_outputs_tensor = torch.argmax(val_outputs_tensor, dim=1, keepdim=True).cpu()
 
+            # On recrée un MetaTensor en lui greffant l'historique (meta) de l'image originale !
+            if hasattr(val_inputs, "meta"):
+                val_outputs_tensor = MetaTensor(val_outputs_tensor, meta=val_inputs.meta)
+            
+            # Version Numpy pour ton calcul de Dice classique
+            val_outputs_np = val_outputs_tensor[:, 0, ...].numpy().astype(np.uint8)
+
+            # --- 2. CALCUL DU DICE ET DU VOLUME ---
             if not args.inference_only:
-                val_labels = val_labels.cpu().numpy()[:, 0, :, :, :]
+                val_labels_np = val_labels.cpu().numpy()[:, 0, :, :, :]
+                tumor_volume = np.sum(val_labels_np)
+                print("number of tumors", count_objects(val_labels_np[0,:,:,:]))
 
-                tumor_volume = np.sum(np.sum(np.sum(val_labels)))
-                #count number of tumors
-                #box, label, count = cv.detect_common_objects(tumor_volume)
-
-                #_, thresh = cv2.threshold(val_labels, 0, 1, cv2.THRESH_BINARY_INV)
-                #kernal = np.ones((2, 2), np.uint8)
-                #dilation = cv2.dilate(thresh, kernal, iterations=2)
-                #contours, hierarchy = cv2.findContours(
-                #    dilation, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                #objects = str(len(contours))
-                print("number of tumors",count_objects(val_labels[0,:,:,:]))
-
-                #print("tumor volume: {}".format(tumor_volume))
                 dice_list_sub = []
-                for i in range(1, 2):
-                    organ_Dice = dice(val_outputs[0] == i, val_labels[0] == i)
-                    dice_list_sub.append(organ_Dice)
-                mean_dice = np.mean(dice_list_sub)
-                print("ImageName, Mean Organ Dice, and Tumor Volume: {}, {}, {}".format(img_name,mean_dice,tumor_volume))
+                for i in range(1, 3): # Calcule pour Tumeur (1) ET Nodules (2)
+                    if np.sum(val_labels_np[0] == i) > 0 or np.sum(val_outputs_np[0] == i) > 0:
+                        organ_Dice = dice(val_outputs_np[0] == i, val_labels_np[0] == i)
+                        dice_list_sub.append(organ_Dice)
+                
+                mean_dice = np.mean(dice_list_sub) if len(dice_list_sub) > 0 else 0.0
+                print("ImageName, Mean Organ Dice, and Tumor Volume: {}, {}, {}".format(img_name, mean_dice, tumor_volume))
                 dice_list_case.append(mean_dice)
             else:
                 mean_dice = None
                 print(f"ImageName: {img_name} (Inference only)")
 
-            # SAVE NIFTI FILES with SimpleITK
-            #####################
-            # Convert to proper dtypes for NIfTI compatibility
-            val_outputs_np = val_outputs[0, :, :, :].astype(np.uint8)  # Predictions as uint8
+            # --- 3. SAUVEGARDE PARFAITE AVEC MONAI INVERTD + SIMPLEITK ---
+            # On injecte la prédiction dans le dictionnaire du batch
+            batch["pred"] = val_outputs_tensor
 
-            # Try to get MONAI's affine matrix for proper coordinate mapping
-            monai_affine = None
-            if hasattr(val_inputs, 'meta') and 'affine' in val_inputs.meta:
-                monai_affine = val_inputs.meta['affine']
-                if hasattr(monai_affine, 'numpy'):
-                    monai_affine = monai_affine.numpy()
-                # Handle batch dimension if present
-                if monai_affine.ndim == 3:
-                    monai_affine = monai_affine[0]
-
-            # Get path to original preprocessed file for resampling
-            original_image_path = None
-            if hasattr(val_inputs, 'meta') and 'filename_or_obj' in val_inputs.meta:
-                original_image_path = val_inputs.meta['filename_or_obj'][0]
-                print(f"📂 Original file path: {original_image_path}")
-
-            # Create prediction SITK image resampled to original preprocessed file space
-            prediction_sitk = create_prediction_sitk_with_metadata(
-                prediction_np=val_outputs_np,
-                original_image_path=original_image_path,
-                spacing=(args.space_x, args.space_y, args.space_z),
-                monai_affine=monai_affine
+            # Configuration de l'inverseur MONAI
+            invertd = Invertd(
+                keys="pred",
+                transform=val_loader.dataset.transform, # Récupère les transfos du loader
+                orig_keys="image", # Calque l'inversion sur "image"
+                nearest_interp=True, # Pas d'interpolation floue pour les classes
+                to_tensor=True
             )
 
-            # Build output filename
-            filename_output_path = os.path.join(
-                test_output_dir, 
-                f'{img_prefix.replace("_petct", "")}_dsc{round(mean_dice, 2)}_Pred.nii.gz'
-            )
-            # Save prediction
-            sitk.WriteImage(prediction_sitk, filename_output_path)
-            print(f"✅ Saved: {filename_output_path}")
+            # Application de l'inversion
+            batch_inverted = [invertd(item) for item in decollate_batch(batch)]
             
-            # Optional: Also save processed CT and PET for verification/visualization
-            # Uncomment these to save CT/PET in same MONAI space as predictions
-            # val_inputs_PET = val_inputs.cpu().numpy()[0, 0, :, :, :].astype(np.float32)
-            # val_inputs_CT = val_inputs.cpu().numpy()[0, 1, :, :, :].astype(np.int16)
-            # 
-            # ct_sitk = sitk.GetImageFromArray(val_inputs_CT)
-            # ct_sitk.SetSpacing((args.space_x, args.space_y, args.space_z))
-            # ct_sitk.SetDirection((1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0))
-            # if monai_affine is not None:
-            #     ct_sitk.SetOrigin((float(monai_affine[0,3]), float(monai_affine[1,3]), float(monai_affine[2,3])))
-            # sitk.WriteImage(ct_sitk, os.path.join(test_output_dir, f'{img_prefix}_CT_monai.nii.gz'))
-            
+            for item_inv in batch_inverted:
+                pred_inverted = item_inv["pred"]
+                
+                # 3.A: Extraction en Numpy et transposition Z,Y,X pour SimpleITK
+                pred_np_final = pred_inverted[0].cpu().numpy().astype(np.uint8)
+                pred_np_sitk = pred_np_final.transpose(2, 1, 0)
+                
+                # 3.B: Création de l'image SimpleITK
+                prediction_sitk = sitk.GetImageFromArray(pred_np_sitk)
+                
+                # 3.C: Récupération du fichier d'origine exact pour copier les infos LPS
+                # On lit les métadonnées directement dans le MetaTensor
+                img_tensor = item_inv["image"]
+                
+                if hasattr(img_tensor, "meta") and "filename_or_obj" in img_tensor.meta:
+                    original_image_path = img_tensor.meta["filename_or_obj"]
+                elif "image_meta_dict" in item_inv: # Fallback pour les vieilles versions
+                    original_image_path = item_inv["image_meta_dict"]["filename_or_obj"]
+                else:
+                    raise ValueError("Impossible de trouver le chemin du fichier source.")
+
+                if isinstance(original_image_path, (list, tuple, np.ndarray)):
+                    original_image_path = original_image_path[0]
+                
+                # Petit nettoyage si le chemin vient sous forme de tenseur ou de chaîne complexe
+                if isinstance(original_image_path, torch.Tensor) or hasattr(original_image_path, "item"):
+                    # Si c'est un objet interne de MONAI, on tente de le nettoyer
+                    original_image_path = str(original_image_path)
+                original_sitk = sitk.ReadImage(original_image_path)
+                
+                # Gestion des images 4D (ex: PET/CT) vers 3D (le masque)
+                if original_sitk.GetDimension() == 4:
+                    size_4d = list(original_sitk.GetSize())
+                    original_sitk_3d = sitk.Extract(original_sitk, [size_4d[0], size_4d[1], size_4d[2], 0], [0, 0, 0, 0])
+                    prediction_sitk.CopyInformation(original_sitk_3d)
+                else:
+                    prediction_sitk.CopyInformation(original_sitk)
+
+                # 3.D: Sauvegarde sur le disque
+                filename_output_path = os.path.join(
+                    test_output_dir, 
+                    f'{img_prefix.replace("_petct", "")}_dsc{round(mean_dice, 2) if mean_dice is not None else "NA"}_Pred.nii.gz'
+                )
+                
+                sitk.WriteImage(prediction_sitk, filename_output_path)
+                print(f"✅ Saved perfectly with MONAI Invertd + SimpleITK: {filename_output_path}")            
             #####################
+            
         if not args.inference_only:
             print("Overall Mean Dice: {}".format(np.mean(dice_list_case)))
 

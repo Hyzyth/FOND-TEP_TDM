@@ -9,26 +9,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import os
-import torch.nn.parallel
+import warnings
+from collections import OrderedDict
+from functools import partial
 import torch.distributed as dist
 import torch.multiprocessing as mp
+import torch.nn.parallel
 import torch.utils.data.distributed
 from monai.inferers.utils import sliding_window_inference
-from monai.losses.dice import DiceLoss, DiceCELoss
+from monai.losses.dice import DiceCELoss, DiceFocalLoss, DiceLoss  # MODIFICATION: Ajout de DiceFocalLoss pour remplacer DiceCELoss.
 from monai.metrics.meandice import DiceMetric
-from monai.utils.enums import MetricReduction
-from monai.transforms.post.array import AsDiscrete,Activations
 from monai.transforms.compose import Compose
-from networks.unetr import UNETR
-from data_utils import get_loader # Modification: Change the reference to the .py in the root with the code changes. Original version stays in utils folder
-from trainer import run_training
-from optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
-from functools import partial
-import argparse
+from monai.transforms.post.array import Activations, AsDiscrete
+from monai.utils.enums import MetricReduction
+from data_utils import get_loader
 from networks.SwinTransModels import CONFIGS as CONFIGS_sw_seg
 from networks.SwinTransModels import *
-import warnings
+from networks.unetr import UNETR
+from optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
+from trainer import run_training
 
 
 #max époque, cache rate et warmum époque à spécifier en shell pour test soft
@@ -91,10 +92,11 @@ parser.add_argument('--lrschedule', default='warmup_cosine', type=str, help='typ
 parser.add_argument('--warmup_epochs', default=50, type=int, help='number of warmup epochs')
 parser.add_argument('--resume_ckpt', action='store_true', help='resume training from pretrained checkpoint')
 parser.add_argument('--resume_jit', action='store_true', help='resume training from pretrained torchscript checkpoint')
-parser.add_argument('--smooth_dr', default=1e-6, type=float, help='constant added to dice denominator to avoid nan')
-parser.add_argument('--smooth_nr', default=0.0, type=float, help='constant added to dice numerator to avoid zero')
-
-
+parser.add_argument('--smooth_dr', default=1e-5, type=float, help='constant added to dice denominator to avoid nan')        # MODIFICATION: Relevé de 1e-6 à 1e-5, évite instabilité sur patches sans tumeur (sliding window).
+parser.add_argument('--smooth_nr', default=1e-5, type=float, help='constant added to dice numerator to avoid zero')         # MODIFICATION: Relevé de 0.0 à 1e-5, évite numérateur nul sur patches de fond pur.
+parser.add_argument('--gamma', default=2.0, type=float, help='focal loss gamma (2.0=standard, 3.0=agressif sur nodes)')     # MODIFICATION: Exposant de focalisation, 2.0 standard, 3.0 si nodes sous-détectés.
+parser.add_argument('--lambda_dice', default=1.0, type=float, help='poids composante dice dans DiceFocalLoss')              # MODIFICATION: Poids de la composante Dice (1.0 = équilibre standard).
+parser.add_argument('--lambda_focal', default=1.0, type=float, help='poids composante focal dans DiceFocalLoss')            # MODIFICATION: Poids de la composante Focal (augmenter si nodes sous-détectés).
 parser.add_argument('--cache_rate', default=1.0, type=float, help='Ratio of dataset to cache in RAM (0.0=safe, 1.0=fast)')
 
 def main():
@@ -128,7 +130,7 @@ def main_worker(gpu, args):
                                 world_size=args.world_size,
                                 rank=args.rank)
         
-        # --- DÉBUT DE LA MODIFICATION (REMPLACE LES ANCIENNES LIGNES) ---
+        # --- Vérification de la disponibilité du GPU avant de configurer le DDP ---
     if torch.cuda.is_available():
         # Si un GPU est là, on le configure comme avant
         args.device = torch.device(f"cuda:{args.gpu}")
@@ -141,17 +143,17 @@ def main_worker(gpu, args):
         print("⚠️ Aucun GPU détecté (ou PyTorch CPU installé). Passage sur CPU.")
         args.distributed = False  # Impossible de faire du distribué sans GPU (souvent)
         args.amp = False          # L'AMP est optimisé pour GPU
-    # --- FIN DE LA MODIFICATION ---
+    # ----------------------------------------------------------
 
     args.test_mode = False
     loader = get_loader(args)
 
-    # --- AJOUTE CECI JUSTE EN DESSOUS ---
+    # --- DEBUG : Affichage du nombre de batchs dans les loaders ---
     print("\n" + "="*30)
     print(f"DEBUG: Nombre de batchs dans le TRAIN loader : {len(loader[0])}")
     print(f"DEBUG: Nombre de batchs dans le VAL loader   : {len(loader[1])}")
     print("="*30 + "\n")
-    # -----------------------------------
+    # ----------------------------------------------------------
 
     print(args.rank, ' gpu', args.gpu)
     if args.rank == 0:
@@ -164,7 +166,7 @@ def main_worker(gpu, args):
         model = SwinUNETR_CrossModalityFusion_OutSum_6stageOuts(config_sw)
         #model = SwinUNETR_dualModalityFusion_OutSum(config_sw)
 
-    # MODIFICATION : Chargement des poids plus robuste (backbone fix)
+    # Ajout de la possibilité de charger un checkpoint pré-entraîné, soit en format PyTorch classique (resume_ckpt), soit en format TorchScript (resume_jit).
         if args.resume_ckpt:
             model_dict = torch.load(os.path.join(pretrained_dir, args.pretrained_model_name), map_location='cpu')
             # On essaie de charger tel quel d'abord, sinon on nettoie les clés
@@ -172,7 +174,6 @@ def main_worker(gpu, args):
                 model.load_state_dict(model_dict)
             except RuntimeError:
                 print("Direct load failed, attempting to remove 'backbone.' prefix...")
-                from collections import OrderedDict
                 new_state_dict = OrderedDict()
                 for k, v in model_dict.items():
                     new_key = k.replace('backbone.', '') if 'backbone.' in k else k
@@ -188,11 +189,35 @@ def main_worker(gpu, args):
     else:
         raise ValueError('Unsupported model ' + str(args.model_name))
 
-    dice_loss = DiceCELoss(to_onehot_y=True,
-                           softmax=True,
-                           squared_pred=True,
-                           smooth_nr=args.smooth_nr,
-                           smooth_dr=args.smooth_dr)
+    # MODIFICATION: Remplacement de DiceCELoss par DiceFocalLoss.
+    # DiceCELoss était instable avec AMP/FP16 (log → NaN sur logits très négatifs).
+    # DiceFocalLoss combine le Dice (robuste au déséquilibre fond/tumeur) et la Focal Loss
+    # qui concentre le gradient sur les cas difficiles via (1-p)^gamma, idéal pour les
+    # nodes lymphatiques petits et discrets en H&N PET/CT. Stable en FP32 sans AMP.
+    dice_loss = DiceFocalLoss(
+                    to_onehot_y=True,
+                    softmax=True,
+                    squared_pred=True,              # stabilise le dénominateur Dice
+                    smooth_nr=args.smooth_nr,       # 1e-5 par défaut
+                    smooth_dr=args.smooth_dr,       # 1e-5 par défaut
+                    gamma=args.gamma,               # 2.0 par défaut
+                    lambda_dice=args.lambda_dice,   # 1.0 par défaut
+                    lambda_focal=args.lambda_focal, # 1.0 par défaut
+                )
+    
+                # DiceCELoss(to_onehot_y=True,
+                #            softmax=True,
+                #            squared_pred=True,
+                #            smooth_nr=args.smooth_nr,
+                #            smooth_dr=args.smooth_dr)
+
+                # DiceLoss(to_onehot_y=True,
+                #          softmax=True,
+                #          squared_pred=True,
+                #          smooth_nr=args.smooth_nr, # 1e-5 par defaut
+                #          smooth_dr=args.smooth_dr) # 1e-8 par defaut
+
+
     # NOUVEAU CODE (Compatible MONAI récent)
     # On passe directement le nombre de classes à to_onehot
     post_label = AsDiscrete(to_onehot=args.out_channels)
@@ -213,10 +238,10 @@ def main_worker(gpu, args):
 
     best_acc = 0
     start_epoch = 0
+    checkpoint = None
 
     if args.checkpoint is not None:
         checkpoint = torch.load(args.checkpoint, map_location='cpu')
-        from collections import OrderedDict
         new_state_dict = OrderedDict()
         for k, v in checkpoint['state_dict'].items():
             new_state_dict[k.replace('backbone.','')] = v
@@ -255,6 +280,10 @@ def main_worker(gpu, args):
                                     weight_decay=args.reg_weight)
     else:
         raise ValueError('Unsupported Optimization Procedure: ' + str(args.optim_name))
+    
+    if checkpoint is not None and 'optimizer' in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        print("=> loaded optimizer state from checkpoint")
 
     if args.lrschedule == 'warmup_cosine':
         scheduler = LinearWarmupCosineAnnealingLR(optimizer,
@@ -267,6 +296,18 @@ def main_worker(gpu, args):
             scheduler.step(epoch=start_epoch)
     else:
         scheduler = None
+
+    if checkpoint is not None and scheduler is not None and 'scheduler' in checkpoint and checkpoint['scheduler'] is not None:
+        scheduler.load_state_dict(checkpoint['scheduler'])
+        print("=> loaded scheduler state from checkpoint")
+
+    if checkpoint is not None and ('scheduler' not in checkpoint or checkpoint['scheduler'] is None):
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = args.optim_lr
+            if 'initial_lr' in param_group:
+                param_group['initial_lr'] = args.optim_lr
+        print(f"=> checkpoint has no scheduler state; reset optimizer lr to {args.optim_lr}")
+
     accuracy = run_training(model=model,
                             train_loader=loader[0],
                             val_loader=loader[1],
@@ -277,6 +318,8 @@ def main_worker(gpu, args):
                             model_inferer=model_inferer,
                             scheduler=scheduler,
                             start_epoch=start_epoch,
+                            start_best_acc=best_acc,
+                            scaler_state=checkpoint.get('scaler') if checkpoint is not None else None,
                             post_label=post_label,
                             post_pred=post_pred)
     return accuracy
