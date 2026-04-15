@@ -1,177 +1,153 @@
-# This file makes part of the  Optimization of prognostic factors 
-# for H&N cancer treatment through longitudinal analysis of PET/CT data (LongiTEP).
-# Coded by : Santiago
-# Anotated by : Santiago
-# file creation date : 29 jan 2026
+#!/bin/bash
+# =============================================================================
+# SwinCross Training Script — SwinUNETR Cross-Modality Fusion
+# Project : ProjetMaster / StageM1_IA
+# Author  : Santiago (original), updated for Ethan's run
+# Updated : 2026-04
+#
+# Data source  : /data/santiago/Datast001_HECKTOR_SwinCross/  (read-only)
+# All outputs  : /data/ethan/SwinCross/hecktor_runs/<MODEL_DIR>/
+#
+# IMPORTANT — train.py prepends ./runs/ to --logdir, so absolute paths
+# break. Fix: symlink ./runs -> /data/ethan/SwinCross/hecktor_runs once, then use
+# short relative names for --logdir. The symlink is created in Step 1.
+# =============================================================================
 
-# Summary :This file contains the bash execution commands to prepare the data, train and infer a swincross unetr model
-# for medical tumour segmentation task, rebuilt by M1 students Elias, Alex and Paul-André
-#using the HECKTOR dataset.
+set -e   # abort on first error
 
-# Current dataset : Dataset_001_HECKTORct
+# =============================================================================
+# STEP 0 — Environment setup (uv + venv + requirements)
+# =============================================================================
 
-#Step 0 : activate swincross envionment and check requirements
-# check uv installation and install python3.12 if not present
-if ! command -v uv &> /dev/null
-then
-    echo "uv could not be found, installing uv..."
+if ! command -v uv &> /dev/null; then
+    echo "uv not found — installing..."
     wget -qO- https://astral.sh/uv/install.sh | sh
+    source "$HOME/.local/bin/env"
 fi
 
 uv python install 3.12
 
-# create and activate swincross virtual environment
 if [ ! -d "swincross_env" ]; then
-    python3.12 -m venv swincross_env
+    uv venv swincross_env --python 3.12
 fi
-
 source swincross_env/bin/activate
 
-requirements_path=requirements.txt
-
-if [ -f $requirements_path ]; then
-    uv pip install -r $requirements_path
+if [ -f requirements.txt ]; then
+    uv pip install -r requirements.txt
 else
-    echo "Requirements file not found!"
+    echo "requirements.txt not found! Aborting."
+    exit 1
 fi
-##################################################################
-# ADRESSES DES DOSSIERS A DEFINIR SELON VOTRE STRUCTURE DE FICHIERS
-##################################################################
+
+# =============================================================================
+# STEP 1 — Path configuration
+# =============================================================================
+
 PPDATA_FOLDER=/data/santiago/Datast001_HECKTOR_SwinCross/
-RAWDATA_FOLDER=/home/santiago/HECKTOR_data/Task_1_segmentation/
-INFERENCE_OUTPUT_FOLDER=/data/ethan/Datast001_HECKTOR_2025_SwinCross_2000ep_predictions/
-MODEL_DIR=hecktor_1gpu_2000ep_run/
+JSON_LIST=dataset_swincross.json
 
-##################################################################
-# #Step 1 : Preprocess HECKTOR dataset to swincross format
-##################################################################
-# uv run dataset_builder_simpleITK.py --input_folder $RAWDATA_FOLDER \
-#                                    --output_folder $PPDATA_FOLDER --val_split 0.2 --seed 42 # Do not change for reproducibility
+# Short name used as the --logdir argument.
+# Actual output path will be: /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/
+MODEL_DIR=ethan_hecktor_2000ep_run
 
-##################################################################
-#Step 2 : Train the model
-##################################################################
-##### No checkpoint loading
-# Use both GPU 0 and 1 for training
-# Note : Multiple GPU training currently not working. Try adding huggingface accelerator lib if later use is necessary
-#######################################################################################################################
-# CUDA_VISIBLE_DEVICES=0,1 torchrun \
-#     --nproc_per_node=2 \
-#     train.py \
-#     --data_dir $PPDATA_FOLDER \
-#     --distributed --batch_size 2 \
-#     --max_epochs 2000 \
-#     --val_every 50 \
-#     --warmup_epochs 100 \
-#     --workers 6 \
-#     --cache_rate 0.5 \
-#     --save_checkpoint \
-#     --logdir $MODEL_DIR \
+# Create output root and symlink ./runs -> /data/ethan/SwinCross/hecktor_runs
+# so train.py's "./runs/$MODEL_DIR" resolves to /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR
+mkdir -p /data/ethan/SwinCross/hecktor_runs
+ln -sfn /data/ethan/SwinCross/hecktor_runs ./runs
 
-# Use only GPU 0 for training
-###############################
-# CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3.12 -u train.py \
-#     --data_dir $PPDATA_FOLDER \
-#     --batch_size 2 \
-#     --max_epochs 2000 \
-#     --val_every 20 \
-#     --warmup_epochs 25 \
-#     --workers 4 \
-#     --cache_rate 1.0 \
-#     --infer_overlap 0.25 \
-#     --save_checkpoint \
-#     --logdir $MODEL_DIR \
-#    > ./runs/$MODEL_DIR/training_debug.log 2>&1 # redirecting stdout and stderr to a log file. excellent if model crashes
+# Pre-create the model directory so the log redirect below doesn't fail
+mkdir -p /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR
 
-##### Checkpoint Loading
-# Continue training from best_model.pth in $MODEL_DIR epoch 640 DSC='0.51',  epoch 100 DSC=0.46 
-##############################################################
-CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    python3.12 -u train.py \
-    --data_dir $PPDATA_FOLDER \
-    --checkpoint ./runs/hecktor_1gpu_2000ep_run/model_best.pth \
+echo "Data      : $PPDATA_FOLDER"
+echo "Outputs   : /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/"
+echo "GPU       : 0 (CUDA_VISIBLE_DEVICES=0)"
+
+# =============================================================================
+# STEP 2A — Training from scratch on GPU 0  [ACTIVE]
+# =============================================================================
+#
+# Parameter notes:
+#   --noamp          : AMP causes vanishing gradients with this loss — use FP32
+#   --save_checkpoint: save model_best.pth and model_last.pth every val cycle
+#   --batch_size 2   : 96³ x 2ch x FP32 is VRAM-heavy; raise to 4 if VRAM allows
+#   --cache_rate 0.5 : caches 50% of training data in RAM; lower to 0.0 if OOM
+#   --val_every 20   : validate every 20 epochs (3000 ep / 20 = 150 checkpoints)
+#   --smooth_nr/dr   : 1e-5 each — more stable than 1e-6 on background-only patches
+#   --RandFlipd_prob 0.5  : increased from default 0.2 to fight overfitting
+#   --gamma 2.0      : DiceFocalLoss focal exponent — standard value
+#   NOTE: --res_block and --dropout_rate are parsed by train.py but have NO effect
+#         on the SwinUNETR model, which uses its own hardcoded config values.
+
+CUDA_VISIBLE_DEVICES=0 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+python3.12 -u train.py \
+    --data_dir   $PPDATA_FOLDER \
+    --logdir     $MODEL_DIR \
+    --json_list  $JSON_LIST \
     --batch_size 2 \
-    --max_epochs 2000 \
-    --val_every 20 \
-    --warmup_epochs 0 \
-    --workers 4 \
-    --cache_rate 1.0 \
-    --infer_overlap 0.25 \
-    --save_checkpoint \
+    --val_every  20 \
+    --workers    4 \
+    --cache_rate 0.5 \
+    --RandFlipd_prob           0.5 \
+    --RandRotate90d_prob       0.5 \
+    --RandScaleIntensityd_prob 0.2 \
+    --RandShiftIntensityd_prob 0.2 \
     --noamp \
-    --logdir $MODEL_DIR \
-   > ./runs/$MODEL_DIR/training_continue_debug.log 2>&1 # redirecting stdout and stderr to a log file. excellent if model crashes
-   
+    --save_checkpoint \
+    2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/training_from_scratch.log
 
-# testing single GPU training for error handling with all HECKTOR data
-######################################################################
-# CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3.12 -u train.py \
-#     --data_dir $PPDATA_FOLDER \
-#     --batch_size 2 \
-#     --max_epochs 5 \
-#     --val_every 2 \
-#     --warmup_epochs 1 \
-#     --workers 4 \
-#     --cache_rate 1.0 \
-#     --infer_overlap 0.25 \
-#     --save_checkpoint \
-#     --logdir $MODEL_DIR \
-#    > ./runs/$MODEL_DIR/inference_debug.log 2>&1 # redirecting stdout and stderr to a log file. excellent if model crashes
-
-# testing single GPU VRAM stress test with all HECKTOR data and 10 epochs to check for memory leaks and VRAM usage
-##################################################################################################################
-# CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3.12 -u train.py \
-#     --data_dir $PPDATA_FOLDER \
-#     --batch_size 2 \
-#     --max_epochs 10 \
-#     --val_every 1 \
-#     --warmup_epochs 10 \
-#     --workers 4 \
-#     --cache_rate 1.0 \
-#     --infer_overlap 0.25 \
-#     --save_checkpoint \
-#     --logdir test_VRAM \
-#    > ./runs/test_VRAM/training_debug.log 2>&1 # redirecting stdout and stderr to a log file. excellent if model crashes
-   
-# testing single GPU VRAM stress and checkpoint retrieval with all HECKTOR data : 3 epochs val_every epoch 
-##################################################################################################################
-# CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3.12 -u train.py \
-#     --data_dir $PPDATA_FOLDER \
-#     --checkpoint ./runs/hecktor_1gpu_2000ep_run/model_best.pth \
-#     --batch_size 2 \
-#     --max_epochs 103 \
-#     --val_every 1 \
-#     --warmup_epochs 3 \
-#     --workers 4 \
-#     --cache_rate 1.0 \
-#     --infer_overlap 0.25 \
+# =============================================================================
+# STEP 2B — Resume from checkpoint  [COMMENT OUT 2A AND UNCOMMENT THIS IF NEEDED]
+# =============================================================================
+# Set warmup_epochs to 0 when resuming (scheduler state is loaded from checkpoint).
+#
+# CUDA_VISIBLE_DEVICES=0 \
+# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+# python3.12 -u train.py \
+#     --data_dir        $PPDATA_FOLDER \
+#     --json_list       $JSON_LIST \
+#     --logdir          $MODEL_DIR \
+#     --checkpoint      ./runs/$MODEL_DIR/model_best.pth \
+#     --warmup_epochs   0 \
+#     --optim_lr        1e-4 \
+#     --reg_weight      1e-5 \
+#     --lrschedule      warmup_cosine \
+#     --RandFlipd_prob          0.5 \
+#     --RandRotate90d_prob      0.5 \
+#     --RandScaleIntensityd_prob 0.2 \
+#     --RandShiftIntensityd_prob 0.2 \
+#     --cache_rate  0.5 \
+#     --workers     4 \
 #     --noamp \
 #     --save_checkpoint \
-#     --logdir test_chkptload_VRAMstress \
-#    > ./runs/test_chkptload_VRAMstress/training_debug.log 2>&1 # redirecting stdout and stderr to a log file. excellent if model crashes
-   
+#     2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/training_resume.log
 
-##################################################################
-#Step 3 : Run inference
-##################################################################
-# CUDA_VISIBLE_DEVICES=1 python3.12 test.py \
-#    --pretrained_dir ./runs/$MODEL_DIR \
-#    --pretrained_model_name model_best.pth \
-#    --output_dir  $INFERENCE_OUTPUT_FOLDER \
-#    --data_dir $PPDATA_FOLDER \
-#    --json_list dataset_swincross.json \
-#    --infer_overlap 0.5
+# =============================================================================
+# STEP 2C — Quick debug run (2 epochs, no caching, no GPU wait)  [COMMENT OUT]
+# =============================================================================
+# Use this to verify the full pipeline runs end-to-end before committing to
+# a 2000-epoch job. Outputs go to ./runs/ethan_debug/ (i.e. /data/ethan/SwinCross/hecktor_runs/ethan_debug/)
+#
+# CUDA_VISIBLE_DEVICES=0 python3.12 train.py \
+#     --data_dir   $PPDATA_FOLDER \
+#     --json_list  $JSON_LIST \
+#     --logdir     ethan_debug \
+#     --batch_size 2 \
+#     --cache_rate 0.0 \
+#     --max_epochs 2 \
+#     --val_every  1 \
+#     --workers    0 \
+#     --noamp
 
-#testing inference 
-# CUDA_VISIBLE_DEVICES=1 python3.12 test.py  --pretrained_dir ./runs/test_debug/  --pretrained_model_name model_best.pth --output_dir /data/santiago/test_debug/  --data_dir ./Dataset_Final_SwinCross_SITK/ --json_list dataset_swincross.json  --infer_overlap 0.5
+# =============================================================================
+# STEP 3 — Export training curves  [UNCOMMENT AFTER TRAINING]
+# =============================================================================
+# uv run export_graphs.py \
+#     --logdir  ./runs/$MODEL_DIR \
+#     --output  /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/training_graphics
 
-##################################################################
-#Step 4 : Postprocess and evaluate results
-##################################################################
-
-## save graphics of training evolution
-# uv run export_graphs.py --logdir ./runs/$MODEL_DIR --output ./runs/$MODEL_DIR/training_graphics/
-# uv run export_graphs.py --logdir ./runs/hecktor_1gpu_2000ep_run/ --output ./runs/hecktor_1gpu_2000ep_run/training_graphics/
-
-##save continuous graphics
-# uv run export_graphs.py --logdir ./runs/hecktor_1gpu_2000ep_run/ --output ./runs/hecktor_1gpu_2000ep_run/training_graphics_continuous --continuous
+# Continuous version (use if training was interrupted and resumed one or more times):
+# uv run export_graphs.py \
+#     --logdir     ./runs/$MODEL_DIR \
+#     --output     /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/training_graphics_continuous \
+#     --continuous
