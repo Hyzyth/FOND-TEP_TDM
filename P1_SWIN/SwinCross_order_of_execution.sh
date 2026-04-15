@@ -87,7 +87,7 @@ python3.12 -u train.py \
     --batch_size 2 \
     --val_every  20 \
     --workers    4 \
-    --cache_rate 0.5 \
+    --cache_rate 1 \
     --RandFlipd_prob           0.5 \
     --RandRotate90d_prob       0.5 \
     --RandScaleIntensityd_prob 0.2 \
