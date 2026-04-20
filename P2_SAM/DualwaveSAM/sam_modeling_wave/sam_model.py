@@ -52,11 +52,24 @@ class PseudoMaskHead(nn.Module):
 class Sam(nn.Module):
     """
     SAM model:
-    - encodes image via ViT backbone
+    - encodes image via image_encoder backbone (ViT or WaveEncoder)
     - encodes prompts (points/boxes/masks)
     - decodes segmentation masks
 
     Extended version includes optional pseudo-mask supervision.
+
+    Args:
+        image_encoder:   any backbone that returns [B, C, H, W] embeddings
+        prompt_encoder:  PromptEncoder
+        mask_decoder:    MaskDecoder
+        pixel_mean/std:  image normalisation statistics
+        img_size:        input image resolution used in postprocessing;
+                         must match the value used to build the model
+                         (required when image_encoder is WaveEncoder, which
+                          has no img_size attribute of its own)
+        use_pseudo_head: attach auxiliary PseudoMaskHead branch
+        use_laplacian:   apply Laplacian edge sharpening to pseudo logits
+                         (only active when use_pseudo_head=True)
     """
 
     mask_threshold: float = 0.0
@@ -64,12 +77,12 @@ class Sam(nn.Module):
 
     def __init__(
         self,
-        image_encoder: ImageEncoderViT,
+        image_encoder,
         prompt_encoder: PromptEncoder,
         mask_decoder: MaskDecoder,
         pixel_mean: List[float] = [123.675, 116.28, 103.53],
         pixel_std: List[float] = [58.395, 57.12, 57.375],
-
+        img_size: int = 1024,
         # ====================================================
         # Optional auxiliary pseudo supervision components
         # ====================================================
@@ -83,7 +96,11 @@ class Sam(nn.Module):
         self.prompt_encoder = prompt_encoder
         self.mask_decoder = mask_decoder
 
-        # Normalization buffers (fixed statistics, not trainable)
+        # Store img_size explicitly so postprocess_masks works with any encoder
+        # (WaveEncoder does not expose .img_size, unlike ImageEncoderViT)
+        self.img_size = img_size
+
+        # Normalisation buffers (fixed statistics, not trainable)
         self.register_buffer(
             "pixel_mean",
             torch.Tensor(pixel_mean).view(-1, 1, 1),
@@ -99,17 +116,19 @@ class Sam(nn.Module):
         # Auxiliary pseudo-mask branch
         # ====================================================
         self.use_pseudo_head = use_pseudo_head
-        self.use_laplacian = use_laplacian
+        # Laplacian edge enhancement is only meaningful when the pseudo head
+        # is active; guard here prevents a NameError if use_pseudo_head=False.
+        self.use_laplacian = use_laplacian and use_pseudo_head
 
         if use_pseudo_head:
             self.pseudo_head = PseudoMaskHead(
                 in_ch=256,
                 mid_ch=64,
-                out_size=(256, 256),
+                out_size=(img_size, img_size),
             )
 
     # --------------------------------------------------------
-    # Epoch tracker (used for scheduling / logging behavior)
+    # Epoch tracker (used for scheduling / logging behaviour)
     # --------------------------------------------------------
     def set_epoch(self, epoch: int):
         self.curr_epoch = int(epoch)
@@ -130,43 +149,31 @@ class Sam(nn.Module):
              [-2, 0, 2],
              [-1, 0, 1]],
             dtype=torch.float32,
-        ).unsqueeze(0).unsqueeze(0)
+        ).unsqueeze(0).unsqueeze(0).to(mask_in.device)
 
         sobel_y = torch.tensor(
             [[1, 2, 1],
              [0, 0, 0],
              [-1, -2, -1]],
             dtype=torch.float32,
-        ).unsqueeze(0).unsqueeze(0)
-
-        sobel_x = sobel_x.to(mask_in.device)
-        sobel_y = sobel_y.to(mask_in.device)
+        ).unsqueeze(0).unsqueeze(0).to(mask_in.device)
 
         grad_x = F.conv2d(mask_in, sobel_x, padding=1)
         grad_y = F.conv2d(mask_in, sobel_y, padding=1)
 
-        edge_map = torch.sqrt(grad_x ** 2 + grad_y ** 2)
-        return edge_map
+        return torch.sqrt(grad_x ** 2 + grad_y ** 2)
 
     @staticmethod
     def laplacian_edge_detection(mask_in: torch.Tensor) -> torch.Tensor:
-        """
-        Compute Laplacian edge map (second-order derivative).
-        """
+        """Compute Laplacian edge map (second-order derivative)."""
         laplacian_kernel = torch.tensor(
-            [[0, 1, 0],
+            [[0,  1, 0],
              [1, -4, 1],
-             [0, 1, 0]],
+             [0,  1, 0]],
             dtype=torch.float32,
-        ).unsqueeze(0).unsqueeze(0)
+        ).unsqueeze(0).unsqueeze(0).to(mask_in.device)
 
-        laplacian_kernel = laplacian_kernel.to(mask_in.device)
-
-        laplacian_map = F.conv2d(mask_in, laplacian_kernel, padding=1)
-
-        # Absolute response emphasizes edges
-        edge_map = torch.abs(laplacian_map)
-        return edge_map
+        return torch.abs(F.conv2d(mask_in, laplacian_kernel, padding=1))
 
     # ============================================================
     # Device property
@@ -182,7 +189,7 @@ class Sam(nn.Module):
         self,
         batched_input: Dict[str, Any],
         multimask_output: bool,
-    ) -> List[Dict[str, torch.Tensor]]:
+    ) -> Dict[str, torch.Tensor]:
 
         input_images = batched_input.get("image")
         image_embeddings = self.image_encoder(input_images)
@@ -197,14 +204,15 @@ class Sam(nn.Module):
             points = None
 
         # ====================================================
-        # Auxiliary pseudo-mask computation branch
+        # Auxiliary pseudo-mask branch (guarded together)
         # ====================================================
+        pseudo_logits = None
         if self.use_pseudo_head:
             pseudo_logits = self.pseudo_head(image_embeddings)
 
-        if self.use_laplacian:
-            laplacian_edges = self.laplacian_edge_detection(pseudo_logits)
-            pseudo_logits = 0.8 * pseudo_logits + 0.2 * laplacian_edges
+            if self.use_laplacian:
+                laplacian_edges = self.laplacian_edge_detection(pseudo_logits)
+                pseudo_logits = 0.8 * pseudo_logits + 0.2 * laplacian_edges
 
         sparse_embeddings, dense_embeddings = self.prompt_encoder(
             points=points,
@@ -233,7 +241,7 @@ class Sam(nn.Module):
         }
 
         # Add auxiliary output if enabled
-        if self.use_pseudo_head:
+        if pseudo_logits is not None:
             outputs["aux_pseudo_logits"] = pseudo_logits
 
         return outputs
@@ -247,10 +255,16 @@ class Sam(nn.Module):
         input_size: Tuple[int, ...],
         original_size: Tuple[int, ...],
     ) -> torch.Tensor:
+        """
+        Upsample low-resolution masks back to the original image size.
 
+        Uses self.img_size (set in __init__) instead of
+        self.image_encoder.img_size so that WaveEncoder backbones are
+        supported without modification.
+        """
         masks = F.interpolate(
             masks,
-            (self.image_encoder.img_size, self.image_encoder.img_size),
+            (self.img_size, self.img_size),
             mode="bilinear",
             align_corners=False,
         )
@@ -270,17 +284,14 @@ class Sam(nn.Module):
     # Preprocessing
     # ============================================================
     def preprocess(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Normalize input image and pad to square resolution.
-        """
-
+        """Normalise input image and pad to square resolution."""
         # Channel-wise normalization
         x = (x - self.pixel_mean) / self.pixel_std
 
         # Pad to square size required by encoder
         h, w = x.shape[-2:]
-        padh = self.image_encoder.img_size - h
-        padw = self.image_encoder.img_size - w
+        padh = self.img_size - h
+        padw = self.img_size - w
 
         x = F.pad(x, (0, padw, 0, padh))
         return x
