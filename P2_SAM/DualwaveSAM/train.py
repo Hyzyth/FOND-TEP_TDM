@@ -70,7 +70,7 @@ def get_scheduler(optimizer, opt):
         scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=opt.niter, eta_min=0)
 
     else:
-        return NotImplementedError('learning rate policy [%s] is not implemented', opt.lr_policy)
+        raise NotImplementedError(f"Learning rate policy '{opt.lr_policy}' is not implemented")
 
     return scheduler
 
@@ -91,37 +91,36 @@ def update_learning_rate(scheduler, optimizer):
 # =========================
 # Training configuration
 # =========================
-parser = argparse.ArgumentParser(description='pix2pix-pytorch-implementation')
+parser = argparse.ArgumentParser(description='DualwaveSAM training')
 
-parser.add_argument('--batch_size', type=int, default=12, help='Training batch size')
-parser.add_argument('--test_batch_size', type=int, default=12, help='Testing batch size')
+parser.add_argument('--batch_size',      type=int,   default=12,      help='Training batch size')
+parser.add_argument('--test_batch_size', type=int,   default=12,      help='Testing batch size')
 
-parser.add_argument('--input_nc', type=int, default=2, help='Number of input channels')
+parser.add_argument('--input_nc',  type=int, default=2, help='Number of input channels')
 parser.add_argument('--output_nc', type=int, default=1, help='Number of output channels')
 
-parser.add_argument('--epoch_count', type=int, default=1, help='Starting epoch index')
-parser.add_argument('--niter', type=int, default=10, help='Epochs at initial learning rate')
-parser.add_argument('--niter_decay', type=int, default=40, help='Epochs for LR decay')
+parser.add_argument('--epoch_count',  type=int,   default=1,  help='Starting epoch index')
+parser.add_argument('--niter',        type=int,   default=10, help='Epochs at initial learning rate')
+parser.add_argument('--niter_decay',  type=int,   default=40, help='Epochs for LR decay')
 
-parser.add_argument('--lr', type=float, default=0.0001, help='Initial learning rate for Adam')
-parser.add_argument('--lr_policy', type=str, default='lambda',
+parser.add_argument('--lr',         type=float, default=0.0001, help='Initial learning rate for Adam')
+parser.add_argument('--lr_policy',  type=str,   default='lambda',
                     help='Learning rate policy: lambda|step|plateau|cosine')
-
 parser.add_argument('--lr_decay_iters', type=int, default=1,
                     help='Step interval for step LR policy')
-
 parser.add_argument('--beta1', type=float, default=0.5, help='Beta1 for Adam optimizer')
 
-parser.add_argument('--cuda', action='store_true', help='Use CUDA acceleration')
-parser.add_argument('--threads', type=int, default=0, help='Data loader threads')
-parser.add_argument('--seed', type=int, default=42, help='Random seed')
+parser.add_argument('--cuda',    action='store_true', help='Use CUDA acceleration')
+parser.add_argument('--threads', type=int,   default=0,  help='Data loader threads')
+parser.add_argument('--seed',    type=int,   default=42, help='Random seed')
 
-parser.add_argument('--lamb1', type=int, default=0.01, help='Weight for L1 loss')
-parser.add_argument('--lamb2', type=int, default=0.1, help='Weight for L2 loss')
-parser.add_argument('--glr', type=int, default=0.000128, help='SGD learning rate')
+# FIX: these were incorrectly typed as int, silently truncating 0.01 → 0
+parser.add_argument('--lamb1', type=float, default=0.01,    help='Weight for L1 loss')
+parser.add_argument('--lamb2', type=float, default=0.1,     help='Weight for L2 loss')
+parser.add_argument('--glr',   type=float, default=0.000128, help='SGD learning rate')
 
-parser.add_argument('--trc', type=int, default=1, help='Training repetition count')
-parser.add_argument('--lamb', type=int, default=10, help='Additional L1 weight')
+parser.add_argument('--trc',  type=int,   default=1,  help='Training repetition count')
+parser.add_argument('--lamb', type=float, default=10, help='Additional L1 weight')
 
 opt = parser.parse_args()
 
@@ -138,7 +137,7 @@ def save_checkpoint(model, optimizer, filename="my_checkpoint.pth.tar"):
     logger.info("=> Saving checkpoint")
     checkpoint = {
         "state_dict": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
+        "optimizer":  optimizer.state_dict(),
     }
     torch.save(checkpoint, filename)
 
@@ -162,10 +161,8 @@ def testOne(model, device):
     if not os.path.exists(save_model):
         os.mkdir(save_model)
 
-    # Model-specific configuration
     if model == 'DualwaveSAM':
-        # wavelet options: haar/db2/sym4/bior4.4
-        fold = 'haar'
+        fold = 'haar'   # wavelet options: haar/db2/sym4/bior4.4
     else:
         fold = 0
 
@@ -175,23 +172,22 @@ def testOne(model, device):
 
     logger.add(f"log/{CHOOSE_DATA}/{mname}-{model}-{fold}.log")
 
-    # Model initialization
+    # Model initialisation
     if model == 'DualwaveSAM':
         from sam_wave import DualwaveSAM
         net_g = DualwaveSAM().to(device)
     else:
-        raise ValueError("Invalid model input")
+        raise ValueError(f"Invalid model: {model}")
 
     # Loss functions
-    criterionL1 = nn.L1Loss().to(device)
+    criterionL1  = nn.L1Loss().to(device)
     criterionMSE = nn.MSELoss().to(device)
 
     # Optimizer
     optimizer_g = optim.Adam(net_g.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
     net_g_scheduler = get_scheduler(optimizer_g, opt)
 
-    # Tracking variables
-    best_dice = 0
+    best_dice  = 0
     best_epoch = 0
     Dice, TDice, Loss = [], [], []
 
@@ -213,7 +209,7 @@ def testOne(model, device):
             for iteration, batch in enumerate(train_set_loader, 1):
                 optimizer_g.zero_grad()
 
-                input = batch['input'].to(device)
+                input  = batch['input'].to(device)
                 target = batch['target'].to(device)
 
                 # Forward pass
@@ -223,7 +219,7 @@ def testOne(model, device):
                     prediction = net_g(input)
 
                 # Loss computation
-                loss_g_l1 = criterionL1(prediction, target) * opt.lamb1
+                loss_g_l1 = criterionL1(prediction,  target) * opt.lamb1
                 loss_g_l2 = criterionMSE(prediction, target) * opt.lamb2
 
                 if model == 'DualwaveSAM':
@@ -234,9 +230,15 @@ def testOne(model, device):
                             loss_g_l1 + loss_g_l2
                         )
                     else:
-                        loss_g = losses.Dice_and_FocalLoss()(prediction, target) + loss_g_l1 + loss_g_l2
+                        loss_g = (
+                            losses.Dice_and_FocalLoss()(prediction, target) +
+                            loss_g_l1 + loss_g_l2
+                        )
                 else:
-                    loss_g = losses.Dice_and_FocalLoss()(prediction, target) + loss_g_l1 + loss_g_l2
+                    loss_g = (
+                        losses.Dice_and_FocalLoss()(prediction, target) +
+                        loss_g_l1 + loss_g_l2
+                    )
 
                 # Backpropagation
                 loss_g.backward()
@@ -278,7 +280,7 @@ def testOne(model, device):
             val_qbar = trange(len(val_set_loader))
 
             for sample in val_set_loader:
-                input = sample['input'].to(device)
+                input  = sample['input'].to(device)
                 target = sample['target'].to(device)
 
                 if model == 'DualwaveSAM':
@@ -291,40 +293,39 @@ def testOne(model, device):
                 targets.append(target.cpu().numpy())
 
                 # Compute metrics
-                pred_np = ex_transforms.ProbsToLabels()(prediction.cpu().numpy())
+                pred_np   = ex_transforms.ProbsToLabels()(prediction.cpu().numpy())
                 target_np = target.cpu().numpy()
 
                 dice_pred = metrics.dice(pred_np, target_np)
 
                 try:
                     hd_val = hd95(pred_np, target_np)
-                except:
+                except Exception:
                     hd_val = np.float64(0)
 
                 tal_dice += dice_pred
                 tal_hd95 += hd_val
-                tal_iou += metrics.iou(pred_np, target_np)
-                tal_voe += metrics.voe(pred_np, target_np)
-                tal_rvd += metrics.rvd(pred_np, target_np)
+                tal_iou  += metrics.iou(pred_np, target_np)
+                tal_voe  += metrics.voe(pred_np, target_np)
+                tal_rvd  += metrics.rvd(pred_np, target_np)
 
                 # Compute lesion-wise F1 score
                 tal_f1s = []
                 for i in range(pred_np.shape[0]):
                     _, _, f1 = metrics.compute_lesion_metrics(pred_np[i], target_np[i])
                     tal_f1s.append(f1)
-
                 tal_f1 += np.mean(tal_f1s)
 
                 val_qbar.set_postfix(epoch=epoch, dice=dice_pred.item(), hd95=hd_val.item())
                 val_qbar.update(1)
 
-        # Average metrics
-        avg_dice = tal_dice / len(val_set_loader)
-        avg_hd95 = tal_hd95 / len(val_set_loader)
-        avg_voe = tal_voe / len(val_set_loader)
-        avg_rvd = tal_rvd / len(val_set_loader)
-        avg_iou = tal_iou / len(val_set_loader)
-        avg_f1 = tal_f1 / len(val_set_loader)
+        n_val = len(val_set_loader)
+        avg_dice = tal_dice / n_val
+        avg_hd95 = tal_hd95 / n_val
+        avg_voe  = tal_voe  / n_val
+        avg_rvd  = tal_rvd  / n_val
+        avg_iou  = tal_iou  / n_val
+        avg_f1   = tal_f1   / n_val
 
         Dice.append(avg_dice)
         Loss.append(train_loss / (len(train_set_loader) * opt.trc))
@@ -335,16 +336,16 @@ def testOne(model, device):
         logger.info(f"Epoch {epoch} metrics:")
         logger.info("train avg_loss: {:.4f}".format(Loss[-1]))
         logger.info("train avg_dice: {:.4f}".format(TDice[-1]))
-        logger.info("test avg_dice: {:.4f}".format(avg_dice))
-        logger.info("test avg_HD95: {:.4f}".format(avg_hd95))
-        logger.info("test avg_IoU: {:.4f}".format(avg_iou))
-        logger.info("test avg_VOE: {:.4f}".format(avg_voe))
-        logger.info("test avg_RVD: {:.4f}".format(avg_rvd))
-        logger.info("test avg_F1: {:.4f}".format(avg_f1))
+        logger.info("test  avg_dice: {:.4f}".format(avg_dice))
+        logger.info("test  avg_HD95: {:.4f}".format(avg_hd95))
+        logger.info("test  avg_IoU:  {:.4f}".format(avg_iou))
+        logger.info("test  avg_VOE:  {:.4f}".format(avg_voe))
+        logger.info("test  avg_RVD:  {:.4f}".format(avg_rvd))
+        logger.info("test  avg_F1:   {:.4f}".format(avg_f1))
 
         # Save best model
         if best_dice < avg_dice:
-            best_dice = avg_dice
+            best_dice  = avg_dice
             best_epoch = epoch
 
             model_save = os.path.join(save_folder, 'best_model')
@@ -352,16 +353,19 @@ def testOne(model, device):
                 os.mkdir(model_save)
 
             torch.save(net_g, os.path.join(model_save, 'net_model.pth'))
-            save_checkpoint(net_g, optimizer_g, filename=os.path.join(model_save, "generator.tar"))
+            save_checkpoint(
+                net_g, optimizer_g,
+                filename=os.path.join(model_save, "generator.tar")
+            )
 
-            summary = pd.DataFrame({
-                'best_dice': [best_dice],
-                'best_epoch': [best_epoch]
-            })
-            summary.to_csv(os.path.join(save_folder, 'summary.csv'), index=False, sep=';')
+            pd.DataFrame({'best_dice': [best_dice], 'best_epoch': [best_epoch]}).to_csv(
+                os.path.join(save_folder, 'summary.csv'), index=False, sep=';'
+            )
 
-            np.savez(os.path.join(save_folder, 'res'),
-                     input=inputs, pred=preds, target=targets)
+            np.savez(
+                os.path.join(save_folder, 'res'),
+                input=inputs, pred=preds, target=targets
+            )
 
         logger.info(f"best dice: {best_dice:.4f} \t best epoch: {best_epoch}")
         logger.info('*' * 100)
@@ -375,72 +379,69 @@ class HECKTORdataset(Dataset):
     Dataset for loading HECKTOR data at slice level.
 
     Features:
-    - Loads pre-split train/test data at patient level
-    - Extracts only slices containing lesions
-    - Caches processed slices to avoid repeated computation
-
+    - Loads pre-split train/test .npz files
+    - Retains only slices that contain at least one foreground label (slices containing lesions)
+    - Class-level cache avoids re-loading across dataset instantiations
+    
     Attributes:
         _cache: class-level cache to store processed data for train/test
     """
 
-    _cache = {'train': None, 'test': None}
+    _cache: dict = {'train': None, 'test': None}
 
     def __init__(self, base_dir: str, mode: str = 'train', transform=None):
         """
         Initialize dataset.
 
         Args:
-            base_dir: base directory containing dataset folders
+            base_dir: root path (folder suffix _train / _test is appended)
             mode: 'train' or 'test'
-            transform: optional data augmentation
+            transform: optional augmentation pipeline
         """
         self.transform = transform
         self.mode = mode
 
         if HECKTORdataset._cache[mode] is None:
-
             folder_path = base_dir + '_' + mode
-            npz_files = glob.glob(os.path.join(folder_path, "*.npz"))
+            npz_files   = glob.glob(os.path.join(folder_path, "*.npz"))
 
             if len(npz_files) == 0:
                 raise FileNotFoundError(f"No .npz files found in {folder_path}")
 
-            all_inputs_list = []
+            all_inputs_list  = []
             all_targets_list = []
 
             for fpath in npz_files:
                 data = np.load(fpath, allow_pickle=True)
 
-                patient_input = data['input']    # (H, W, D, C)
+                patient_input  = data['input']   # (H, W, D, C)
                 patient_target = data['target']  # (H, W, D)
 
                 # Remove extra batch dimension if present
                 if patient_input.ndim == 5 and patient_input.shape[0] == 1:
-                    patient_input = patient_input[0]
+                    patient_input  = patient_input[0]
                     patient_target = patient_target[0]
 
                 # Convert to slice-first format
-                patient_input = np.transpose(patient_input, (2, 0, 1, 3))
+                # → (D, H, W, C) and (D, H, W)
+                patient_input  = np.transpose(patient_input,  (2, 0, 1, 3))
                 patient_target = np.transpose(patient_target, (2, 0, 1))
 
                 # Identify slices containing lesions
-                has_any = patient_target.sum(axis=(1, 2)) > 0
-                has_one = np.any(patient_target == 1, axis=(1, 2))
-                valid_mask = has_any & has_one
+                has_any  = patient_target.sum(axis=(1, 2)) > 0
+                has_one  = np.any(patient_target == 1, axis=(1, 2))
+                valid    = has_any & has_one
 
-                valid_inputs = patient_input[valid_mask]
-                valid_targets = patient_target[valid_mask]
-
-                all_inputs_list.append(valid_inputs)
-                all_targets_list.append(valid_targets)
+                all_inputs_list.append(patient_input[valid])
+                all_targets_list.append(patient_target[valid])
 
             # Cache processed slices
             HECKTORdataset._cache[mode] = {
-                'inputs': np.concatenate(all_inputs_list, axis=0),
-                'targets': np.concatenate(all_targets_list, axis=0)
+                'inputs':  np.concatenate(all_inputs_list,  axis=0),
+                'targets': np.concatenate(all_targets_list, axis=0),
             }
 
-        self.inputs = HECKTORdataset._cache[mode]['inputs']
+        self.inputs  = HECKTORdataset._cache[mode]['inputs']
         self.targets = HECKTORdataset._cache[mode]['targets']
 
         print(f"Mode: {mode} | Total slices: {len(self.inputs)}")
@@ -458,17 +459,21 @@ class HECKTORdataset(Dataset):
             - input: image tensor
             - target: segmentation mask
         """
-        sample = dict()
-
-        sample['id'] = idx
-        sample['input'] = self.inputs[idx]
-        sample['target'] = self.targets[idx]
+        sample = {
+            'id':     idx,
+            'input':  self.inputs[idx],
+            'target': self.targets[idx],
+        }
 
         # Resize input and target
-        sample['input'] = cv2.resize(sample['input'], (256, 256), interpolation=cv2.INTER_LINEAR)
+        sample['input'] = cv2.resize(
+            sample['input'], (256, 256), interpolation=cv2.INTER_LINEAR
+        )
         sample['input'] = sample['input'].transpose([1, 0, 2])
 
-        sample['target'] = cv2.resize(sample['target'], (256, 256), interpolation=cv2.INTER_NEAREST)
+        sample['target'] = cv2.resize(
+            sample['target'], (256, 256), interpolation=cv2.INTER_NEAREST
+        )
         sample['target'] = np.expand_dims(sample['target'], axis=2)
         sample['target'] = sample['target'].transpose([1, 0, 2])
 
@@ -477,19 +482,20 @@ class HECKTORdataset(Dataset):
 
         return sample
 
+
 if __name__ == "__main__":
     curr_time = datetime.datetime.now()
 
     # GPU assignment
     device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 
-    CHOOSE_DATA = "Hecktor"   # CHEN / Hecktor
+    CHOOSE_DATA       = "Hecktor"   # CHEN / Hecktor
     save_result_folder = f'results/{CHOOSE_DATA}'
+    base_data_dir     = f"/data/code/MMCA-Net/dataset/{CHOOSE_DATA}"
+    mname             = 'TBME'
 
-    base_data_dir = f"/data/code/MMCA-Net/dataset/{CHOOSE_DATA}"
-
-    mname = 'TBME'
-    test_info = "00"
+    os.makedirs(save_result_folder, exist_ok=True)
+    os.makedirs(f"log/{CHOOSE_DATA}", exist_ok=True)
 
     if opt.cuda and not torch.cuda.is_available():
         raise Exception("No GPU found, please run without --cuda")
@@ -501,26 +507,25 @@ if __name__ == "__main__":
     mr_transform = ex_transforms.Compose([
         ex_transforms.Horizontal_Mirroring(p=0.5),
         ex_transforms.Vertical_Mirroring(p=0.5),
-        ex_transforms.ToTensor()
+        ex_transforms.ToTensor(),
     ])
 
     val_transform = ex_transforms.Compose([
-        ex_transforms.ToTensor()
+        ex_transforms.ToTensor(),
     ])
 
     train_data = HECKTORdataset(base_dir=base_data_dir, mode='train', transform=mr_transform)
-    val_data = HECKTORdataset(base_dir=base_data_dir, mode='test', transform=val_transform)
+    val_data   = HECKTORdataset(base_dir=base_data_dir, mode='test',  transform=val_transform)
 
-    print("\n")
-    print(f"Training slices: {len(train_data)}")
-    print(f"Validation slices: {len(val_data)}")
+    print(f"\nTraining slices:   {len(train_data)}")
+    print(f"Validation slices: {len(val_data)}\n")
 
     train_set_loader = DataLoader(
         dataset=train_data,
         num_workers=opt.threads,
         batch_size=opt.batch_size,
         shuffle=True,
-        drop_last=True
+        drop_last=True,
     )
 
     val_set_loader = DataLoader(
@@ -528,16 +533,13 @@ if __name__ == "__main__":
         num_workers=opt.threads,
         batch_size=opt.test_batch_size,
         shuffle=False,
-        drop_last=True
+        drop_last=True,
     )
 
-    logger.info(f"{len(train_set_loader)}, {len(val_set_loader)}")
-
+    logger.info(f"train batches: {len(train_set_loader)}, val batches: {len(val_set_loader)}")
     logger.info('===> Building models')
 
-    nList = ['DualwaveSAM']
-
-    for i in nList:
-        print('\n' + '*' * 30 + f"Training model {i}" + '*' * 30)
-        testOne(i, device)
-        print('\n' + '*' * 30 + f"Finished model {i}" + '*' * 30)
+    for model_name in ['DualwaveSAM']:
+        print('\n' + '*' * 30 + f" Training model {model_name} " + '*' * 30)
+        testOne(model_name, device)
+        print('\n' + '*' * 30 + f" Finished model {model_name} " + '*' * 30)
