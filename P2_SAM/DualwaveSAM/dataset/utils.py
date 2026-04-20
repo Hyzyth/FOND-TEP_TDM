@@ -31,7 +31,6 @@ def get_paths_to_patient_files(path_to_imgs, append_mask=True):
         - (CT_path, PET_path) if append_mask=False
         - (CT_path, PET_path, MASK_path) if append_mask=True
     """
-
     path_to_imgs = pathlib.Path(path_to_imgs)
     print(path_to_imgs)
 
@@ -40,11 +39,10 @@ def get_paths_to_patient_files(path_to_imgs, append_mask=True):
     print(patients)
 
     paths = []
-
     for p in patients:
         # Standard naming convention per patient folder
-        path_to_ct = path_to_imgs / p / (p + "__CT.nii.gz")
-        path_to_pt = path_to_imgs / p / (p + "__PT.nii.gz")
+        path_to_ct  = path_to_imgs / p / (p + "__CT.nii.gz")
+        path_to_pt  = path_to_imgs / p / (p + "__PT.nii.gz")
 
         if append_mask:
             # Ground-truth mask naming (dataset-specific override noted)
@@ -81,7 +79,6 @@ def get_train_val_paths(all_paths, path_to_train_val_pkl):
     tuple[list, list]
         (train_paths, val_paths)
     """
-
     path_to_train_val_pkl = pathlib.Path(path_to_train_val_pkl)
 
     with open(path_to_train_val_pkl) as f:
@@ -90,46 +87,23 @@ def get_train_val_paths(all_paths, path_to_train_val_pkl):
     # Assign samples based on CT filename matching patient IDs
     train_paths = [
         path for path in all_paths
-        if any(patient_id + "_ct.nii.gz" in str(path[0])
-               for patient_id in train_val_split["train"])
+        if any(pid + "_ct.nii.gz" in str(path[0]) for pid in train_val_split["train"])
     ]
-
     val_paths = [
         path for path in all_paths
-        if any(patient_id + "_ct.nii.gz" in str(path[0])
-               for patient_id in train_val_split["val"])
+        if any(pid + "_ct.nii.gz" in str(path[0]) for pid in train_val_split["val"])
     ]
 
     return train_paths, val_paths
 
 
 def read_nifti(path):
-    """
-    Load a NIfTI file using SimpleITK.
-
-    Parameters
-    ----------
-    path : str or pathlib.Path
-
-    Returns
-    -------
-    sitk.Image
-        Loaded medical image.
-    """
+    """Load a NIfTI file using SimpleITK."""
     return sitk.ReadImage(str(path))
 
 
 def write_nifti(sitk_img, path):
-    """
-    Write a SimpleITK image to disk in NIfTI format.
-
-    Parameters
-    ----------
-    sitk_img : sitk.Image
-        Image to save.
-    path : str or pathlib.Path
-        Output file path.
-    """
+    """Write a SimpleITK image to disk in NIfTI format."""
     writer = sitk.ImageFileWriter()
     writer.SetImageIO("NiftiImageIO")
     writer.SetFileName(str(path))
@@ -137,28 +111,15 @@ def write_nifti(sitk_img, path):
 
 
 def get_attributes(sitk_image):
-    """
-    Extract spatial metadata from a SimpleITK image.
-
-    Includes origin, spacing, direction, size, and pixel type.
-
-    Parameters
-    ----------
-    sitk_image : sitk.Image
-
-    Returns
-    -------
-    dict
-        Dictionary containing image spatial attributes.
-    """
-
-    attributes = {}
-    attributes["orig_pixelid"] = sitk_image.GetPixelIDValue()
-    attributes["orig_origin"] = sitk_image.GetOrigin()
-    attributes["orig_direction"] = sitk_image.GetDirection()
-    attributes["orig_spacing"] = np.array(sitk_image.GetSpacing())
-    attributes["orig_size"] = np.array(sitk_image.GetSize(), dtype=np.int)
-    return attributes
+    """Extract spatial metadata from a SimpleITK image. Includes origin, spacing, direction, size, and pixel type."""
+    return {
+        "orig_pixelid":  sitk_image.GetPixelIDValue(),
+        "orig_origin":   sitk_image.GetOrigin(),
+        "orig_direction": sitk_image.GetDirection(),
+        "orig_spacing":  np.array(sitk_image.GetSpacing()),
+        # FIX: np.int removed in NumPy 1.24 – use np.int64 instead
+        "orig_size":     np.array(sitk_image.GetSize(), dtype=np.int64),
+    }
 
 
 def resample_sitk_image(
@@ -172,64 +133,40 @@ def resample_sitk_image(
     """
     Resample a SimpleITK image to a new spacing and/or resolution.
 
-    This function preserves or redefines spatial metadata and applies
-    interpolation to match the requested output grid.
-
     Parameters
     ----------
-    sitk_image : sitk.Image
-        Input image.
-    new_spacing : list[float]
-        Target voxel spacing in mm.
-    new_size : list[int] or None
-        Output image size. If None, it is derived from spacing ratio.
-    attributes : dict or None
-        If provided, overrides original image metadata.
-    interpolator : sitk interpolator
-        Interpolation mode:
-            - sitk.sitkNearestNeighbor
-            - sitk.sitkLinear
-            - sitk.sitkGaussian
-            - sitk.sitkLabelGaussian
-            - sitk.sitkBSpline
-            - sitk.sitkHammingWindowedSinc
-            - sitk.sitkCosineWindowedSinc
-            - sitk.sitkWelchWindowedSinc
-            - sitk.sitkLanczosWindowedSinc
-    fill_value : int or float
-        Padding value for empty regions.
-
-    Returns
-    -------
-    sitk.Image
-        Resampled image in the new spatial domain.
-
+    sitk_image  : sitk.Image
+    new_spacing : list[float]   target voxel spacing in mm
+    new_size    : list[int] | None
+    attributes  : dict | None   override original image metadata
+    interpolator: sitk interpolator constant
+    fill_value  : padding value
     Notes
     -----
     Implementation based on:
     https://github.com/deepmedic/SimpleITK-examples/blob/master/examples/resample_isotropically.py
     """
-
     sitk_interpolator = interpolator
 
     # Extract metadata either from provided attributes or from image itself
     if attributes:
-        orig_pixelid = attributes["orig_pixelid"]
-        orig_origin = attributes["orig_origin"]
+        orig_pixelid  = attributes["orig_pixelid"]
+        orig_origin   = attributes["orig_origin"]
         orig_direction = attributes["orig_direction"]
-        orig_spacing = attributes["orig_spacing"]
-        orig_size = attributes["orig_size"]
+        orig_spacing  = attributes["orig_spacing"]
+        orig_size     = attributes["orig_size"]
     else:
-        orig_pixelid = sitk_image.GetPixelIDValue()
-        orig_origin = sitk_image.GetOrigin()
+        orig_pixelid  = sitk_image.GetPixelIDValue()
+        orig_origin   = sitk_image.GetOrigin()
         orig_direction = sitk_image.GetDirection()
-        orig_spacing = np.array(sitk_image.GetSpacing())
-        orig_size = np.array(sitk_image.GetSize(), dtype=np.int)
+        orig_spacing  = np.array(sitk_image.GetSpacing())
+        # FIX: np.int removed in NumPy 1.24 – use np.int64 instead
+        orig_size     = np.array(sitk_image.GetSize(), dtype=np.int64)
 
     # Compute new image size if not explicitly provided
     if not new_size:
         new_size = orig_size * (orig_spacing / new_spacing)
-        new_size = np.ceil(new_size).astype(np.int)
+        new_size = np.ceil(new_size).astype(np.int64)
         new_size = [int(s) for s in new_size]
 
     # Execute resampling operation
