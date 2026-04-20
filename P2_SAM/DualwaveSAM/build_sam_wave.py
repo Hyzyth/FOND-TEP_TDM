@@ -41,9 +41,6 @@ build_sam = build_sam_vit_h
 # SAM ViT-L builder
 # =========================
 def build_sam_vit_l(args):
-    """
-    Build SAM ViT-L variant.
-    """
     return _build_sam(
         encoder_embed_dim=1024,
         encoder_depth=24,
@@ -136,6 +133,9 @@ def _build_sam_dual_wave(image_size, checkpoint, wavelet):
         ),
         pixel_mean=[123.675, 116.28, 103.53],
         pixel_std=[58.395, 57.12, 57.375],
+        # FIX: explicitly pass img_size so Sam.postprocess_masks works
+        # with WaveEncoder (which has no .img_size attribute)
+        img_size=image_size,
     )
 
     # Load checkpoint if provided
@@ -145,10 +145,10 @@ def _build_sam_dual_wave(image_size, checkpoint, wavelet):
 
         try:
             if "model" in state_dict.keys():
-                sam.load_state_dict(state_dict["model"], False)
+                sam.load_state_dict(state_dict["model"], strict=False)
             else:
                 sam.load_state_dict(state_dict)
-        except:
+        except Exception:
             print("*******interpolate fallback triggered")
             new_state_dict = load_from(sam, state_dict, image_size, vit_patch_size)
             sam.load_state_dict(new_state_dict)
@@ -182,7 +182,6 @@ def _build_sam(
         checkpoint: pretrained weights path
         encoder_adapter: enable adapter modules
     """
-
     prompt_embed_dim = 256
     vit_patch_size = 16
     image_embedding_size = image_size // vit_patch_size
@@ -223,6 +222,7 @@ def _build_sam(
         ),
         pixel_mean=[123.675, 116.28, 103.53],
         pixel_std=[58.395, 57.12, 57.375],
+        img_size=image_size,
     )
 
     # Load pretrained weights
@@ -233,14 +233,14 @@ def _build_sam(
         try:
             if "model" in state_dict.keys():
                 print(encoder_adapter)
-                sam.load_state_dict(state_dict["model"], False)
+                sam.load_state_dict(state_dict["model"], strict=False)
             else:
                 if image_size == 1024 and encoder_adapter is True:
-                    sam.load_state_dict(state_dict, False)
+                    sam.load_state_dict(state_dict, strict=False)
                 else:
                     sam.load_state_dict(state_dict)
 
-        except:
+        except Exception:
             print("*******interpolate fallback triggered")
             new_state_dict = load_from(sam, state_dict, image_size, vit_patch_size)
             sam.load_state_dict(new_state_dict)
@@ -281,6 +281,11 @@ def load_from(sam, state_dicts, image_size, vit_patch_size):
         and except_keys[2] not in k
     }
 
+    # Only resize positional embeddings for ViT encoders
+    if "image_encoder.pos_embed" not in new_state_dict:
+        sam_dict.update(new_state_dict)
+        return sam_dict
+
     pos_embed = new_state_dict["image_encoder.pos_embed"]
     token_size = int(image_size // vit_patch_size)
 
@@ -301,9 +306,7 @@ def load_from(sam, state_dicts, image_size, vit_patch_size):
 
         global_rel_pos_keys = [
             k for k in rel_pos_keys
-            if "2" in k or "5" in k or "7" in k or "8" in k or
-               "11" in k or "13" in k or "15" in k or
-               "23" in k or "31" in k
+            if any(idx in k for idx in ["2", "5", "7", "8", "11", "13", "15", "23", "31"])
         ]
 
         for k in global_rel_pos_keys:
