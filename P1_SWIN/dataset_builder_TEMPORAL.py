@@ -14,7 +14,10 @@ subfolder that contains:
 The script:
   1. Merges PET + CT → 4-D NIfTI  (channel 0 = PET, channel 1 = CT)
   2. Combines tumor T (=1) and node N (=2) into a single GT mask on the CT grid
-  3. Writes everything under --output_folder / imagesTs | labelsTs
+  3. Writes everything under --output_folder:
+       imagesTs/    — fused 4-D PET+CT  (model input)
+       labelsTs/    — combined GT mask
+       rawImagesTs/ — raw (non-fused) PET and CT kept separately
   4. Generates a MONAI-compatible JSON (all cases in "validation")
 
 Usage:
@@ -134,6 +137,16 @@ def best_gt(rtstruct_dirs: list):
 
 # ── SimpleITK helpers ─────────────────────────────────────────────────────────
 
+def _same_grid(a: sitk.Image, b: sitk.Image) -> bool:
+    """True only if size, spacing, origin AND direction all match."""
+    return (
+        a.GetSize()      == b.GetSize()
+        and np.allclose(a.GetSpacing(),   b.GetSpacing(),   atol=1e-4)
+        and np.allclose(a.GetOrigin(),    b.GetOrigin(),    atol=1e-4)
+        and np.allclose(a.GetDirection(), b.GetDirection(), atol=1e-4)
+    )
+
+
 def resample_to_reference(image, reference, is_label: bool = False):
     r = sitk.ResampleImageFilter()
     r.SetReferenceImage(reference)
@@ -150,11 +163,13 @@ def merge_pet_ct(pet_path: str, ct_path: str, output_path: str):
     pet = sitk.ReadImage(pet_path)
     ct  = sitk.ReadImage(ct_path)
 
-    # Resample PET to CT grid if needed
-    if pet.GetSize() != ct.GetSize() or pet.GetSpacing() != ct.GetSpacing():
+    # Resample PET to CT grid if any spatial metadata differs (size, spacing,
+    # origin, or direction).  Checking size+spacing alone is insufficient —
+    # two images can share the same grid dimensions while sitting at different
+    # positions/orientations in physical space.
+    if not _same_grid(pet, ct):
         pet = resample_to_reference(pet, ct, is_label=False)
 
-    # --- Eenforce same pixel type ---
     pet = sitk.Cast(pet, sitk.sitkFloat32)
     ct  = sitk.Cast(ct,  sitk.sitkFloat32)
 
@@ -166,21 +181,29 @@ def merge_pet_ct(pet_path: str, ct_path: str, output_path: str):
 def build_gt_mask(t_path, n_path, ct_path: str, output_path: str) -> bool:
     """
     Build a combined GT mask (T=1, N=2) on the CT grid.
-    Returns True if the mask is non-empty.
+
+    BUG FIX: masks are ALWAYS resampled to the CT reference regardless of
+    whether their voxel-grid size happens to match.  Two images can share the
+    same (nx, ny, nz) while having a different origin or direction cosine
+    matrix — if we skip resampling in that case the mask array ends up in the
+    wrong physical frame, producing the apparent rotation seen in the viewer.
+
+    Returns True if the final mask is non-empty.
     """
     ct = sitk.ReadImage(ct_path)
 
-    mask_np = np.zeros(ct.GetSize()[::-1], dtype=np.uint8)  # z,y,x
+    mask_np = np.zeros(ct.GetSize()[::-1], dtype=np.uint8)  # (nz, ny, nx)
 
     if t_path:
         t_img = sitk.Cast(sitk.ReadImage(t_path), sitk.sitkUInt8)
-        if t_img.GetSize() != ct.GetSize():
+        # Always resample — ensures physical-space alignment even when sizes match
+        if not _same_grid(t_img, ct):
             t_img = resample_to_reference(t_img, ct, is_label=True)
         mask_np[sitk.GetArrayFromImage(t_img) > 0] = 1
 
     if n_path:
         n_img = sitk.Cast(sitk.ReadImage(n_path), sitk.sitkUInt8)
-        if n_img.GetSize() != ct.GetSize():
+        if not _same_grid(n_img, ct):
             n_img = resample_to_reference(n_img, ct, is_label=True)
         # N fills only background voxels (T takes priority)
         mask_np[(sitk.GetArrayFromImage(n_img) > 0) & (mask_np == 0)] = 2
@@ -190,6 +213,23 @@ def build_gt_mask(t_path, n_path, ct_path: str, output_path: str) -> bool:
     sitk.WriteImage(out, output_path)
 
     return bool(mask_np.sum() > 0)
+
+
+def copy_raw_images(pet_path: str, ct_path: str,
+                    out_pet_path: str, out_ct_path: str):
+    """
+    Save the raw (non-fused) PET and CT as individual 3-D NIfTIs.
+    PET is resampled to the CT grid (same fix as the fused pipeline) so that
+    the two files share identical spatial metadata for easy overlay in viewers.
+    """
+    pet = sitk.ReadImage(pet_path)
+    ct  = sitk.ReadImage(ct_path)
+
+    if not _same_grid(pet, ct):
+        pet = resample_to_reference(pet, ct, is_label=False)
+
+    sitk.WriteImage(sitk.Cast(pet, sitk.sitkFloat32), out_pet_path)
+    sitk.WriteImage(sitk.Cast(ct,  sitk.sitkFloat32), out_ct_path)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -215,7 +255,7 @@ def main():
                   else set(args.timepoints.split(",")))
 
     if not args.dry_run:
-        for sub in ("imagesTs", "labelsTs"):
+        for sub in ("imagesTs", "labelsTs", "rawImagesTs"):
             os.makedirs(os.path.join(args.output_folder, sub), exist_ok=True)
 
     json_data = {
@@ -287,6 +327,12 @@ def main():
                 out_lbl = os.path.join(
                     args.output_folder, "labelsTs", f"{case_id}_gt.nii.gz"
                 )
+                out_raw_pet = os.path.join(
+                    args.output_folder, "rawImagesTs", f"{case_id}_pet.nii.gz"
+                )
+                out_raw_ct = os.path.join(
+                    args.output_folder, "rawImagesTs", f"{case_id}_ct.nii.gz"
+                )
 
                 pet_type = "SUVbw" if "SUVbw" in os.path.basename(pet_path) else "PT"
                 n_flag   = " +N" if n_path else ""
@@ -298,6 +344,7 @@ def main():
                         non_empty = build_gt_mask(t_path, n_path, ct_path, out_lbl)
                         if not non_empty:
                             print(f"     ⚠  GT mask is empty for {case_id}")
+                        copy_raw_images(pet_path, ct_path, out_raw_pet, out_raw_ct)
                     except Exception as e:
                         skipped += 1
                         print(f"  ❌ Error on {case_id}: {e}")
@@ -306,9 +353,11 @@ def main():
                 json_data["validation"].append({
                     "image": f"imagesTs/{case_id}_petct.nii.gz",
                     "label": f"labelsTs/{case_id}_gt.nii.gz",
-                    "case_id":   case_id,
-                    "patient":   pat_id,
-                    "timepoint": tp_norm,
+                    "raw_pet": f"rawImagesTs/{case_id}_pet.nii.gz",
+                    "raw_ct":  f"rawImagesTs/{case_id}_ct.nii.gz",
+                    "case_id":    case_id,
+                    "patient":    pat_id,
+                    "timepoint":  tp_norm,
                     "study_date": study_date,
                 })
                 ok += 1
