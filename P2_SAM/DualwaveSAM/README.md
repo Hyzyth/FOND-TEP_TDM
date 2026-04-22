@@ -3,3 +3,5 @@
 
 ## How to use
 You need to use **dataset/dataSetGen.py** to generate the 2D sliced ​​npz dataset from 3D NII, and then use **train.py** to train model.
+
+**Paper:** [DualWave SAM](https://ieeexplore.ieee.org/document/11476882)
