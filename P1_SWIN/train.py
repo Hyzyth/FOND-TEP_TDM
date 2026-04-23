@@ -286,9 +286,21 @@ def main_worker(gpu, args):
         print("=> loaded optimizer state from checkpoint")
 
     if args.lrschedule == 'warmup_cosine':
-        scheduler = LinearWarmupCosineAnnealingLR(optimizer,
-                                                  warmup_epochs=args.warmup_epochs,
-                                                  max_epochs=args.max_epochs)
+        scheduler = LinearWarmupCosineAnnealingLR(
+            optimizer,
+            warmup_epochs=args.warmup_epochs,
+            max_epochs=args.max_epochs
+        )
+
+    if checkpoint is not None:
+        print(f"=> reinitializing scheduler for new max_epochs={args.max_epochs}")
+
+        # move scheduler to the correct epoch
+        scheduler.step(start_epoch)
+
+        # force optimizer LR to match scheduler
+        for param_group, lr in zip(optimizer.param_groups, scheduler.get_last_lr()):
+            param_group["lr"] = lr
     elif args.lrschedule == 'cosine_anneal':
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,
                                                                T_max=args.max_epochs)
@@ -296,17 +308,6 @@ def main_worker(gpu, args):
             scheduler.step(epoch=start_epoch)
     else:
         scheduler = None
-
-    if checkpoint is not None and scheduler is not None and 'scheduler' in checkpoint and checkpoint['scheduler'] is not None:
-        scheduler.load_state_dict(checkpoint['scheduler'])
-        print("=> loaded scheduler state from checkpoint")
-
-    if checkpoint is not None and ('scheduler' not in checkpoint or checkpoint['scheduler'] is None):
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = args.optim_lr
-            if 'initial_lr' in param_group:
-                param_group['initial_lr'] = args.optim_lr
-        print(f"=> checkpoint has no scheduler state; reset optimizer lr to {args.optim_lr}")
 
     accuracy = run_training(model=model,
                             train_loader=loader[0],

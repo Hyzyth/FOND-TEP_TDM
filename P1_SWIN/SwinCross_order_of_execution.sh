@@ -78,49 +78,51 @@ echo "GPU       : 0 (CUDA_VISIBLE_DEVICES=0)"
 #   NOTE: --res_block and --dropout_rate are parsed by train.py but have NO effect
 #         on the SwinUNETR model, which uses its own hardcoded config values.
 
+# CUDA_VISIBLE_DEVICES=0 \
+# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+# python3.12 -u train.py \
+#     --data_dir   $PPDATA_FOLDER \
+#     --logdir     $MODEL_DIR \
+#     --json_list  $JSON_LIST \
+#     --batch_size 2 \
+#     --val_every  20 \
+#     --workers    4 \
+#     --cache_rate 1 \
+#     --RandFlipd_prob           0.5 \
+#     --RandRotate90d_prob       0.5 \
+#     --RandScaleIntensityd_prob 0.2 \
+#     --RandShiftIntensityd_prob 0.2 \
+#     --noamp \
+#     --save_checkpoint \
+#     2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/training_from_scratch.log
+
+# =============================================================================
+# STEP 2B — Resume from checkpoint (adjusted for new scheduler logic)
+# =============================================================================
+
 CUDA_VISIBLE_DEVICES=0 \
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 python3.12 -u train.py \
-    --data_dir   $PPDATA_FOLDER \
-    --logdir     $MODEL_DIR \
-    --json_list  $JSON_LIST \
-    --batch_size 2 \
-    --val_every  20 \
-    --workers    4 \
-    --cache_rate 1 \
+    --data_dir        $PPDATA_FOLDER \
+    --json_list       $JSON_LIST \
+    --logdir          $MODEL_DIR \
+    --checkpoint      ./runs/$MODEL_DIR/model_last.pth \
+    --max_epochs      400 \
+    --warmup_epochs   50 \
+    --batch_size      2 \
+    --val_every       20 \
+    --optim_lr        1e-4 \
+    --reg_weight      1e-5 \
+    --lrschedule      warmup_cosine \
     --RandFlipd_prob           0.5 \
     --RandRotate90d_prob       0.5 \
     --RandScaleIntensityd_prob 0.2 \
     --RandShiftIntensityd_prob 0.2 \
+    --cache_rate  1 \
+    --workers     4 \
     --noamp \
     --save_checkpoint \
-    2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/training_from_scratch.log
-
-# =============================================================================
-# STEP 2B — Resume from checkpoint  [COMMENT OUT 2A AND UNCOMMENT THIS IF NEEDED]
-# =============================================================================
-# Set warmup_epochs to 0 when resuming (scheduler state is loaded from checkpoint).
-#
-# CUDA_VISIBLE_DEVICES=0 \
-# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-# python3.12 -u train.py \
-#     --data_dir        $PPDATA_FOLDER \
-#     --json_list       $JSON_LIST \
-#     --logdir          $MODEL_DIR \
-#     --checkpoint      ./runs/$MODEL_DIR/model_best.pth \
-#     --warmup_epochs   0 \
-#     --optim_lr        1e-4 \
-#     --reg_weight      1e-5 \
-#     --lrschedule      warmup_cosine \
-#     --RandFlipd_prob          0.5 \
-#     --RandRotate90d_prob      0.5 \
-#     --RandScaleIntensityd_prob 0.2 \
-#     --RandShiftIntensityd_prob 0.2 \
-#     --cache_rate  0.5 \
-#     --workers     4 \
-#     --noamp \
-#     --save_checkpoint \
-#     2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/training_resume.log
+    2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/training_resume.log
 
 # =============================================================================
 # STEP 2C — Quick debug run (2 epochs, no caching, no GPU wait)  [COMMENT OUT]
