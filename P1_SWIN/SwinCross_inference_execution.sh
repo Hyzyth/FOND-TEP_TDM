@@ -39,12 +39,12 @@ mkdir -p /data/ethan/SwinCross/hecktor_runs
 ln -sfn /data/ethan/SwinCross/hecktor_runs ./runs
 
 # Output folder for predicted segmentation masks
-INFERENCE_OUTPUT=/data/ethan/SwinCross/hecktor_2000ep_predictions
+INFERENCE_OUTPUT=/data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/hecktor_2000ep_predictions
 mkdir -p $INFERENCE_OUTPUT
 
 echo "Model dir : /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/"
 echo "Output    : $INFERENCE_OUTPUT/"
-echo "GPU       : 0 (CUDA_VISIBLE_DEVICES=0)"
+echo "GPU       : $CUDA_VISIBLE_DEVICES"
 
 # =============================================================================
 # STEP 2A — Inference on validation set using BEST model  [ACTIVE]
@@ -55,18 +55,18 @@ echo "GPU       : 0 (CUDA_VISIBLE_DEVICES=0)"
 #   dataset_swincross_testing_group.json (build it with test_or_inf_dataset_builer_spitk.py)
 # =============================================================================
 
-CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
-    --pretrained_dir        ./runs/$MODEL_DIR \
-    --pretrained_model_name model_best.pth \
-    --output_dir            $INFERENCE_OUTPUT/best_model \
-    --data_dir              $PPDATA_FOLDER \
-    --json_list             dataset_swincross.json \
-    --infer_overlap         0.5 \
-    --in_channels           2 \
-    --out_channels          3 \
-    --roi_x 96 --roi_y 96 --roi_z 96 \
-    --workers               4 \
-    2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_best.log
+# CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
+#     --pretrained_dir        ./runs/$MODEL_DIR \
+#     --pretrained_model_name model_best.pth \
+#     --output_dir            $INFERENCE_OUTPUT/best_model \
+#     --data_dir              $PPDATA_FOLDER \
+#     --json_list             dataset_swincross.json \
+#     --infer_overlap         0.5 \
+#     --in_channels           2 \
+#     --out_channels          3 \
+#     --roi_x 96 --roi_y 96 --roi_z 96 \
+#     --workers               4 \
+#     2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_best.log
 
 # =============================================================================
 # STEP 2B — Inference using LAST model  [UNCOMMENT IF NEEDED]
@@ -86,26 +86,46 @@ CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
 #     2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_last.log
 
 # =============================================================================
-# STEP 2C — Inference on dedicated test set (no ground truth / pure inference)
+# STEP 2C — Inference on dedicated test set
+# Requires dataset_swincross_testing_group.json built with:
+#   python3.12 test_or_inf_dataset_builer_spitk.py \
+#       --input_folder /data/santiago/Datast001_HECKTOR_SwinCross/ \
+#       --json_name dataset_swincross_testing_group.json \
+# =============================================================================
+CUDA_VISIBLE_DEVICES=1 python3.12 test.py \
+    --pretrained_dir        ./runs/$MODEL_DIR \
+    --pretrained_model_name model_best.pth \
+    --output_dir            $INFERENCE_OUTPUT/test_set_inference \
+    --data_dir              $PPDATA_FOLDER \
+    --json_list             dataset_swincross_testing_group.json \
+    --infer_overlap         0.7 \
+    --in_channels           2 \
+    --out_channels          3 \
+    --roi_x 96 --roi_y 96 --roi_z 96 \
+    --workers               4 \
+    2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_testset.log
+
+# =============================================================================
+# STEP 2Cbis — Inference on dedicated test set with inference only (no dice, no metrics)
 # Requires dataset_swincross_testing_group.json built with:
 #   python3.12 test_or_inf_dataset_builer_spitk.py \
 #       --input_folder /data/santiago/Datast001_HECKTOR_SwinCross/ \
 #       --json_name dataset_swincross_testing_group.json \
 #       --inference_only
 # =============================================================================
-# CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
+# CUDA_VISIBLE_DEVICES=1 python3.12 test.py \
 #     --pretrained_dir        ./runs/$MODEL_DIR \
 #     --pretrained_model_name model_best.pth \
 #     --output_dir            $INFERENCE_OUTPUT/test_set_inference_only \
 #     --data_dir              $PPDATA_FOLDER \
 #     --json_list             dataset_swincross_testing_group.json \
-#     --infer_overlap         0.5 \
+#     --infer_overlap         0.7 \
 #     --in_channels           2 \
 #     --out_channels          3 \
 #     --roi_x 96 --roi_y 96 --roi_z 96 \
 #     --workers               4 \
-#     --inference_only \
-#     2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_testset.log
+#     --inference_only         \
+#     2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_only_testset.log
 
 # =============================================================================
 # STEP 2D — High-overlap inference (more accurate, slower)  [UNCOMMENT IF NEEDED]
