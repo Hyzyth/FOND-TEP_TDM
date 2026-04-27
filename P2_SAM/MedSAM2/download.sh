@@ -15,11 +15,11 @@ fi
 # Define the base URL for MedSAM2 models on Hugging Face
 HF_BASE_URL="https://huggingface.co/wanglab/MedSAM2/resolve/main"
 # Define the model checkpoint files (as separate variables instead of an array)
-MODEL1="MedSAM2_2411.pt"
-MODEL2="MedSAM2_US_Heart.pt"
-MODEL3="MedSAM2_MRI_LiverLesion.pt"
-MODEL4="MedSAM2_CTLesion.pt"
-MODEL5="MedSAM2_latest.pt"
+MODEL1="MedSAM2_2411.pt"    #The based model trained in Nov. 2024
+MODEL2="MedSAM2_US_Heart.pt"    #Fine-tuned model for heart ultrasound video segmentation
+MODEL3="MedSAM2_MRI_LiverLesion.pt" #Fine-tuned model for liver lesion MRI segmentation
+MODEL4="MedSAM2_CTLesion.pt"    #Fine-tuned model for CT lesion segmentation
+MODEL5="MedSAM2_latest.pt"  #(recommended): Latest model trained on the combination of existing public datasets and newly annotated datasets
 
 # Download each checkpoint
 for model in $MODEL1 $MODEL2 $MODEL3 $MODEL4 $MODEL5; do
