@@ -17,7 +17,6 @@ import torch
 import torchvision.transforms as T
 import torchvision.transforms.functional as F
 import torchvision.transforms.v2.functional as Fv2
-from PIL import Image as PILImage
 
 from torchvision.transforms import InterpolationMode
 
@@ -438,123 +437,6 @@ class RandomAffine:
                 interpolation=self.image_interpolation,
                 fill=self.fill_img,
             )
-        return datapoint
-
-
-def random_mosaic_frame(
-    datapoint,
-    index,
-    grid_h,
-    grid_w,
-    target_grid_y,
-    target_grid_x,
-    should_hflip,
-):
-    # Step 1: downsize the images and paste them into a mosaic
-    image_data = datapoint.frames[index].data
-    is_pil = isinstance(image_data, PILImage.Image)
-    if is_pil:
-        H_im = image_data.height
-        W_im = image_data.width
-        image_data_output = PILImage.new("RGB", (W_im, H_im))
-    else:
-        H_im = image_data.size(-2)
-        W_im = image_data.size(-1)
-        image_data_output = torch.zeros_like(image_data)
-
-    downsize_cache = {}
-    for grid_y in range(grid_h):
-        for grid_x in range(grid_w):
-            y_offset_b = grid_y * H_im // grid_h
-            x_offset_b = grid_x * W_im // grid_w
-            y_offset_e = (grid_y + 1) * H_im // grid_h
-            x_offset_e = (grid_x + 1) * W_im // grid_w
-            H_im_downsize = y_offset_e - y_offset_b
-            W_im_downsize = x_offset_e - x_offset_b
-
-            if (H_im_downsize, W_im_downsize) in downsize_cache:
-                image_data_downsize = downsize_cache[(H_im_downsize, W_im_downsize)]
-            else:
-                image_data_downsize = F.resize(
-                    image_data,
-                    size=(H_im_downsize, W_im_downsize),
-                    interpolation=InterpolationMode.BILINEAR,
-                    antialias=True,  # antialiasing for downsizing
-                )
-                downsize_cache[(H_im_downsize, W_im_downsize)] = image_data_downsize
-            if should_hflip[grid_y, grid_x].item():
-                image_data_downsize = F.hflip(image_data_downsize)
-
-            if is_pil:
-                image_data_output.paste(image_data_downsize, (x_offset_b, y_offset_b))
-            else:
-                image_data_output[:, y_offset_b:y_offset_e, x_offset_b:x_offset_e] = (
-                    image_data_downsize
-                )
-
-    datapoint.frames[index].data = image_data_output
-
-    # Step 2: downsize the masks and paste them into the target grid of the mosaic
-    for obj in datapoint.frames[index].objects:
-        if obj.segment is None:
-            continue
-        assert obj.segment.shape == (H_im, W_im) and obj.segment.dtype == torch.uint8
-        segment_output = torch.zeros_like(obj.segment)
-
-        target_y_offset_b = target_grid_y * H_im // grid_h
-        target_x_offset_b = target_grid_x * W_im // grid_w
-        target_y_offset_e = (target_grid_y + 1) * H_im // grid_h
-        target_x_offset_e = (target_grid_x + 1) * W_im // grid_w
-        target_H_im_downsize = target_y_offset_e - target_y_offset_b
-        target_W_im_downsize = target_x_offset_e - target_x_offset_b
-
-        segment_downsize = F.resize(
-            obj.segment[None, None],
-            size=(target_H_im_downsize, target_W_im_downsize),
-            interpolation=InterpolationMode.BILINEAR,
-            antialias=True,  # antialiasing for downsizing
-        )[0, 0]
-        if should_hflip[target_grid_y, target_grid_x].item():
-            segment_downsize = F.hflip(segment_downsize[None, None])[0, 0]
-
-        segment_output[
-            target_y_offset_b:target_y_offset_e, target_x_offset_b:target_x_offset_e
-        ] = segment_downsize
-        obj.segment = segment_output
-
-    return datapoint
-
-
-class RandomMosaicVideoAPI:
-    def __init__(self, prob=0.15, grid_h=2, grid_w=2, use_random_hflip=False):
-        self.prob = prob
-        self.grid_h = grid_h
-        self.grid_w = grid_w
-        self.use_random_hflip = use_random_hflip
-
-    def __call__(self, datapoint, **kwargs):
-        if random.random() > self.prob:
-            return datapoint
-
-        # select a random location to place the target mask in the mosaic
-        target_grid_y = random.randint(0, self.grid_h - 1)
-        target_grid_x = random.randint(0, self.grid_w - 1)
-        # whether to flip each grid in the mosaic horizontally
-        if self.use_random_hflip:
-            should_hflip = torch.rand(self.grid_h, self.grid_w) < 0.5
-        else:
-            should_hflip = torch.zeros(self.grid_h, self.grid_w, dtype=torch.bool)
-        for i in range(len(datapoint.frames)):
-            datapoint = random_mosaic_frame(
-                datapoint,
-                i,
-                grid_h=self.grid_h,
-                grid_w=self.grid_w,
-                target_grid_y=target_grid_y,
-                target_grid_x=target_grid_x,
-                should_hflip=should_hflip,
-            )
-
         return datapoint
 
 
