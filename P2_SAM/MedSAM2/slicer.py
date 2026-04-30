@@ -15,23 +15,22 @@ def load_nifti_mask(path):
         tuple: (mask array as int16, affine matrix, NIfTI header)
     """
     img = nib.load(path)
-    mask = img.get_fdata()
-    if not np.issubdtype(mask.dtype, np.integer):
-        mask = mask.astype(np.int16)
+    mask = img.get_fdata(dtype=np.int16)
     return mask, img.affine, img.header
 
 
-def voxel_to_world(affine, x, y, z):
+def voxel_to_world(affine, z, y, x):
     """
-    Convert voxel coordinates to world coordinates using the affine matrix.
+    Convert voxel coordinates (z, y, x) to world coordinates using the affine matrix.
 
     Args:
         affine (ndarray): Affine transformation matrix.
-        x, y, z (int): Voxel coordinates.
+        z, y, x (int): Voxel coordinates in (z, y, x) order.
 
     Returns:
         ndarray: World coordinates.
     """
+    # Convert (z, y, x) to (x, y, z) for affine application
     return apply_affine(affine, (x, y, z))
 
 
@@ -63,14 +62,17 @@ def find_all_components_for_label(mask, label_value, padding=0, affine=None):
         component_mask = (labeled == component_id)
 
         # Find z-range of the component
+        # np.where returns indices in (z, y, x) order for a 3D array
         z_indices = np.where(component_mask)[0]
         min_z, max_z = int(np.min(z_indices)), int(np.max(z_indices))
 
         # Compute the bounding box for the component
         slices_list = find_objects(component_mask)
-        if not slices_list:
+        if not slices_list or slices_list[0] is None or len(slices_list[0]) != 3:
             continue
 
+        # The slices returned by find_objects correspond to (z, y, x) axes, matching mask.shape order (depth, height, width)
+        assert len(mask.shape) == 3, "Mask must be a 3D array with axis order (z, y, x)"
         z_slice, y_slice, x_slice = slices_list[0]
         z0 = max(0, z_slice.start - padding)
         z1 = min(mask.shape[0], z_slice.stop + padding)
@@ -79,7 +81,7 @@ def find_all_components_for_label(mask, label_value, padding=0, affine=None):
         x0 = max(0, x_slice.start - padding)
         x1 = min(mask.shape[2], x_slice.stop + padding)
 
-        cropped_mask = mask[z0:z1, y0:y1, x0:x1]
+        cropped_mask = component_mask[z0:z1, y0:y1, x0:x1]
         voxel_count = np.sum(component_mask)
 
         result = {
@@ -88,15 +90,15 @@ def find_all_components_for_label(mask, label_value, padding=0, affine=None):
             "voxel_count": int(voxel_count),
             "min_z": min_z,
             "max_z": max_z,
-            "bbox_voxel": (z0, z1, y0, y1, x0, x1),
+            "bbox_voxel": {"z": (z0, z1), "y": (y0, y1), "x": (x0, x1)},
             "cropped_mask": cropped_mask,
         }
 
         if affine is not None:
             # Convert voxel bounding box corners to world coordinates
             result["bbox_world"] = {
-                "min_corner": tuple(voxel_to_world(affine, x0, y0, z0)),
-                "max_corner": tuple(voxel_to_world(affine, x1 - 1, y1 - 1, z1 - 1)),
+                "min_corner": tuple(voxel_to_world(affine, z0, y0, x0)),
+                "max_corner": tuple(voxel_to_world(affine, z1 - 1, y1 - 1, x1 - 1)),
             }
 
         results.append(result)
@@ -115,12 +117,15 @@ def find_components(mask, padding=0, affine=None, label_values=(1, 2)):
         padding (int, optional): Padding for the bounding box.
         affine (ndarray, optional): Affine matrix for world coordinate conversion.
         label_values (iterable of int, optional): Label values to process.
+            Default is (1, 2) for GTVt and GTVn.
 
     Returns:
         dict: Mapping of label values to lists of component info dictionaries.
     """
     results = {}
-    for label_value in label_values:
+    # Only process label values that are present in the mask
+    present_labels = set(np.unique(mask)).intersection(label_values)
+    for label_value in present_labels:
         components = find_all_components_for_label(mask, label_value, padding=padding, affine=affine)
         if components:
             results[label_value] = components
