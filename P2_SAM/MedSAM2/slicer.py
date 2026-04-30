@@ -63,7 +63,8 @@ def find_all_components_for_label(mask, label_value, padding=0, affine=None):
 
         # Find z-range of the component
         # np.where returns indices in (z, y, x) order for a 3D array
-        z_indices = np.where(component_mask)[0]
+        # Here, we only extract z indices for min/max z; for completeness, y and x can also be extracted if needed.
+        z_indices, y_indices, x_indices = np.where(component_mask)
         min_z, max_z = int(np.min(z_indices)), int(np.max(z_indices))
 
         # Compute the bounding box for the component
@@ -72,7 +73,7 @@ def find_all_components_for_label(mask, label_value, padding=0, affine=None):
             continue
 
         # The slices returned by find_objects correspond to (z, y, x) axes, matching mask.shape order (depth, height, width)
-        assert len(mask.shape) == 3, "Mask must be a 3D array with axis order (z, y, x)"
+        assert len(mask.shape) == 3, f"Mask must be a 3D array with axis order (z, y, x), but got shape {mask.shape}"
         z_slice, y_slice, x_slice = slices_list[0]
         z0 = max(0, z_slice.start - padding)
         z1 = min(mask.shape[0], z_slice.stop + padding)
@@ -123,7 +124,7 @@ def find_components(mask, padding=0, affine=None, label_values=(1, 2)):
         dict: Mapping of label values to lists of component info dictionaries.
     """
     results = {}
-    # Only process label values that are present in the mask
+    # Only process label values that are present in the mask to avoid unnecessary computation
     present_labels = set(np.unique(mask)).intersection(label_values)
     for label_value in present_labels:
         components = find_all_components_for_label(mask, label_value, padding=padding, affine=affine)
