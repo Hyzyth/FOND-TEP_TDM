@@ -1,8 +1,14 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
+"""
+training/dataset/vos_sampler.py
+================================
+Frame and object samplers for the Video Object Segmentation (VOS) pipeline.
 
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
+Classes
+-------
+VOSSampler          – abstract base
+RandomUniformSampler – uniform random clip + random object subset (training)
+EvalSampler          – all frames + all objects (evaluation)
+"""
 
 import random
 from dataclasses import dataclass
@@ -15,91 +21,127 @@ MAX_RETRIES = 1000
 
 @dataclass
 class SampledFramesAndObjects:
-    frames: List[int]
+    """Output of a :class:`VOSSampler` call.
+
+    Attributes
+    ----------
+    frames : list
+        Sampled :class:`~training.dataset.vos_raw_dataset.VOSFrame` objects.
+    object_ids : list[int]
+        Sampled object IDs visible in the first frame.
+    """
+
+    frames: List
     object_ids: List[int]
 
 
 class VOSSampler:
-    def __init__(self, sort_frames=True):
-        # frames are ordered by frame id when sort_frames is True
+    """Abstract base class for VOS samplers.
+
+    Parameters
+    ----------
+    sort_frames : bool
+        When True the returned frames are sorted by ascending frame index.
+    """
+
+    def __init__(self, sort_frames: bool = True) -> None:
         self.sort_frames = sort_frames
 
-    def sample(self, video):
-        raise NotImplementedError()
+    def sample(self, video, segment_loader, epoch=None) -> SampledFramesAndObjects:
+        raise NotImplementedError
 
 
 class RandomUniformSampler(VOSSampler):
+    """Sample a contiguous clip of *num_frames* and up to *max_num_objects*.
+
+    Parameters
+    ----------
+    num_frames : int
+        Number of consecutive frames to include in the clip.
+    max_num_objects : int
+        Maximum number of objects sampled from the first frame.
+    reverse_time_prob : float
+        Probability of reversing temporal order of the clip.
+    """
+
     def __init__(
         self,
-        num_frames,
-        max_num_objects,
-        reverse_time_prob=0.0,
-    ):
+        num_frames: int,
+        max_num_objects: int,
+        reverse_time_prob: float = 0.0,
+    ) -> None:
+        super().__init__()
         self.num_frames = num_frames
         self.max_num_objects = max_num_objects
         self.reverse_time_prob = reverse_time_prob
 
-    def sample(self, video, segment_loader, epoch=None):
+    def sample(self, video, segment_loader, epoch=None) -> SampledFramesAndObjects:
+        """Sample a random clip and object subset.
 
-        for retry in range(MAX_RETRIES):
-            if len(video.frames) < self.num_frames:
-                raise Exception(
-                    f"Cannot sample {self.num_frames} frames from video {video.video_name} as it only has {len(video.frames)} annotated frames."
-                )
+        Parameters
+        ----------
+        video : VOSVideo
+        segment_loader : any segment loader
+        epoch : int, optional  (unused but kept for API compatibility)
+
+        Returns
+        -------
+        SampledFramesAndObjects
+
+        Raises
+        ------
+        Exception
+            When no valid starting position is found after MAX_RETRIES.
+        """
+        if len(video.frames) < self.num_frames:
+            raise Exception(
+                f"Cannot sample {self.num_frames} frames from '{video.video_name}' "
+                f"which has only {len(video.frames)} frames."
+            )
+
+        for _ in range(MAX_RETRIES):
             start = random.randrange(0, len(video.frames) - self.num_frames + 1)
-            frames = [video.frames[start + step] for step in range(self.num_frames)]
-            if random.uniform(0, 1) < self.reverse_time_prob:
-                # Reverse time
+            frames = [video.frames[start + s] for s in range(self.num_frames)]
+
+            if random.random() < self.reverse_time_prob:
                 frames = frames[::-1]
 
-            # Get first frame object ids
-            visible_object_ids = []
-            loaded_segms = segment_loader.load(frames[0].frame_idx)
-            if isinstance(loaded_segms, LazySegments):
-                # LazySegments for SA1BRawDataset
-                visible_object_ids = list(loaded_segms.keys())
+            # Only accept clips where the first frame has foreground.
+            first_segs = segment_loader.load(frames[0].frame_idx)
+            if isinstance(first_segs, LazySegments):
+                visible_ids = list(first_segs.keys())
             else:
-                for object_id, segment in segment_loader.load(
-                    frames[0].frame_idx
-                ).items():
-                    if segment.sum():
-                        visible_object_ids.append(object_id)
+                visible_ids = [
+                    oid
+                    for oid, seg in first_segs.items()
+                    if seg.sum() > 0
+                ]
 
-            # First frame needs to have at least a target to track
-            if len(visible_object_ids) > 0:
+            if visible_ids:
                 break
-            if retry >= MAX_RETRIES - 1:
-                raise Exception("No visible objects")
+        else:
+            raise Exception(
+                f"No visible objects found after {MAX_RETRIES} retries for '{video.video_name}'."
+            )
 
         object_ids = random.sample(
-            visible_object_ids,
-            min(len(visible_object_ids), self.max_num_objects),
+            visible_ids, min(len(visible_ids), self.max_num_objects)
         )
         return SampledFramesAndObjects(frames=frames, object_ids=object_ids)
 
 
 class EvalSampler(VOSSampler):
-    """
-    VOS Sampler for evaluation: sampling all the frames and all the objects in a video
-    """
+    """Return all frames and all objects (for evaluation / inference)."""
 
-    def __init__(
-        self,
-    ):
-        super().__init__()
-
-    def sample(self, video, segment_loader, epoch=None):
-        """
-        Sampling all the frames and all the objects
-        """
-        if self.sort_frames:
-            # ordered by frame id
-            frames = sorted(video.frames, key=lambda x: x.frame_idx)
-        else:
-            # use the original order
-            frames = video.frames
-        object_ids = segment_loader.load(frames[0].frame_idx).keys()
-        if len(object_ids) == 0:
-            raise Exception("First frame of the video has no objects")
-
+    def sample(self, video, segment_loader, epoch=None) -> SampledFramesAndObjects:
+        frames = (
+            sorted(video.frames, key=lambda f: f.frame_idx)
+            if self.sort_frames
+            else video.frames
+        )
+        object_ids = list(segment_loader.load(frames[0].frame_idx).keys())
+        if not object_ids:
+            raise Exception(
+                f"First frame of '{video.video_name}' has no annotated objects."
+            )
         return SampledFramesAndObjects(frames=frames, object_ids=object_ids)

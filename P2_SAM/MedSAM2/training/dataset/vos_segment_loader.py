@@ -1,179 +1,227 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
+"""
+training/dataset/vos_segment_loader.py
+========================================
+Segment loaders for different annotation formats.
 
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
+Classes
+-------
+PalettisedPNGSegmentLoader  – single paletted PNG per frame
+MultiplePNGSegmentLoader    – one PNG per object per frame
+NPZSegmentLoader            – masks stored in a pre-loaded numpy array (HECKTOR)
+JSONSegmentLoader           – COCO-style JSON annotations
+LazySegments                – lazy-loading wrapper for SA-1B style data
+"""
 
 import glob
 import json
 import os
+from typing import Dict, Optional
 
 import numpy as np
-import pandas as pd
 import torch
-
 from PIL import Image as PILImage
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+
 class PalettisedPNGSegmentLoader:
-    def __init__(self, video_png_root, sample_rate=1):
-        """
-        SegmentLoader for datasets with masks stored as palettised PNGs.
-        video_png_root: the folder contains all the masks stored in png
-        """
+    """Load multi-object masks stored as a single palettised PNG per frame.
+
+    Parameters
+    ----------
+    video_png_root : str
+        Directory containing ``<frame_idx>.png`` files.
+    sample_rate : int
+        Keep every *sample_rate*-th file.
+    """
+
+    def __init__(self, video_png_root: str, sample_rate: int = 1) -> None:
         self.video_png_root = video_png_root
         self.sample_rate = sample_rate
-        # build a mapping from frame id to their PNG mask path
-        # note that in some datasets, the PNG paths could have more
-        # than 5 digits, e.g. "00000000.png" instead of "00000.png"
-        png_filenames = sorted(glob.glob(os.path.join(self.video_png_root, "*.png"))) # os.listdir(self.video_png_root)
-        self.frame_id_to_png_filename = {}
-        for idx, filename in enumerate(png_filenames[::self.sample_rate]):
-            frame_id = idx # int(os.path.basename(filename).split(".")[0])
-            self.frame_id_to_png_filename[frame_id] = filename
+        png_filenames = sorted(glob.glob(os.path.join(video_png_root, "*.png")))
+        self.frame_id_to_png_filename: Dict[int, str] = {
+            idx: fname
+            for idx, fname in enumerate(png_filenames[::sample_rate])
+        }
 
-    def load(self, frame_id):
+    def load(self, frame_id: int) -> Dict[int, torch.Tensor]:
+        """Return ``{object_id: binary_mask_tensor}`` for *frame_id*.
+
+        Parameters
+        ----------
+        frame_id : int
+
+        Returns
+        -------
+        dict[int, torch.Tensor]  bool tensors of shape (H, W)
         """
-        load the single palettised mask from the disk (path: f'{self.video_png_root}/{frame_id:05d}.png')
-        Args:
-            frame_id: int, define the mask path
-        Return:
-            binary_segments: dict
-        """
-        # check the path
-        mask_path = os.path.join(
-            self.video_png_root, self.frame_id_to_png_filename[frame_id]
-        )
+        mask_path = self.frame_id_to_png_filename[frame_id]
+        masks = np.array(PILImage.open(mask_path).convert("P"))
+        object_ids = np.unique(masks)
+        object_ids = object_ids[object_ids != 0]
+        return {
+            int(oid): torch.from_numpy(masks == oid)
+            for oid in object_ids
+        }
 
-        # load the mask
-        masks = PILImage.open(mask_path).convert("P")
-        masks = np.array(masks)
+    def __len__(self) -> int:
+        return len(self.frame_id_to_png_filename)
 
-        object_id = pd.unique(masks.flatten())
-        object_id = object_id[object_id != 0]  # remove background (0)
 
-        # convert into N binary segmentation masks
-        binary_segments = {}
-        for i in object_id:
-            bs = masks == i
-            binary_segments[i] = torch.from_numpy(bs)
-
-        return binary_segments
-
-    def __len__(self):
-        return
-
+# ──────────────────────────────────────────────────────────────────────────────
 
 class MultiplePNGSegmentLoader:
-    def __init__(self, video_png_root, single_object_mode=False):
-        """
-        video_png_root: the folder contains all the masks stored in png
-        single_object_mode: whether to load only a single object at a time
-        """
+    """Load masks stored as one PNG per object per frame.
+
+    Parameters
+    ----------
+    video_png_root : str
+        Directory whose sub-directories are named by object ID.
+    single_object_mode : bool
+        When True the root contains the PNGs directly (one object only).
+    """
+
+    def __init__(self, video_png_root: str, single_object_mode: bool = False) -> None:
         self.video_png_root = video_png_root
         self.single_object_mode = single_object_mode
-        # read a mask to know the resolution of the video
-        if self.single_object_mode:
-            tmp_mask_path = glob.glob(os.path.join(video_png_root, "*.png"))[0]
-        else:
-            tmp_mask_path = glob.glob(os.path.join(video_png_root, "*", "*.png"))[0]
-        tmp_mask = np.array(PILImage.open(tmp_mask_path))
-        self.H = tmp_mask.shape[0]
-        self.W = tmp_mask.shape[1]
-        if self.single_object_mode:
-            self.obj_id = (
-                int(video_png_root.split("/")[-1]) + 1
-            )  # offset by 1 as bg is 0
-        else:
-            self.obj_id = None
 
-    def load(self, frame_id):
-        if self.single_object_mode:
-            return self._load_single_png(frame_id)
+        if single_object_mode:
+            tmp = glob.glob(os.path.join(video_png_root, "*.png"))[0]
         else:
-            return self._load_multiple_pngs(frame_id)
+            tmp = glob.glob(os.path.join(video_png_root, "*", "*.png"))[0]
 
-    def _load_single_png(self, frame_id):
-        """
-        load single png from the disk (path: f'{self.obj_id}/{frame_id:05d}.png')
-        Args:
-            frame_id: int, define the mask path
-        Return:
-            binary_segments: dict
-        """
+        tmp_mask = np.array(PILImage.open(tmp))
+        self.H, self.W = tmp_mask.shape[:2]
+        self.obj_id = (
+            int(video_png_root.split("/")[-1]) + 1 if single_object_mode else None
+        )
+
+    def load(self, frame_id: int) -> Dict[int, torch.Tensor]:
+        if self.single_object_mode:
+            return self._load_single(frame_id)
+        return self._load_multiple(frame_id)
+
+    def _load_single(self, frame_id: int) -> Dict[int, torch.Tensor]:
         mask_path = os.path.join(self.video_png_root, f"{frame_id:05d}.png")
-        binary_segments = {}
-
         if os.path.exists(mask_path):
-            mask = np.array(PILImage.open(mask_path))
+            mask = np.array(PILImage.open(mask_path)) > 0
         else:
-            # if png doesn't exist, empty mask
             mask = np.zeros((self.H, self.W), dtype=bool)
-        binary_segments[self.obj_id] = torch.from_numpy(mask > 0)
-        return binary_segments
+        return {self.obj_id: torch.from_numpy(mask)}
 
-    def _load_multiple_pngs(self, frame_id):
-        """
-        load multiple png masks from the disk (path: f'{obj_id}/{frame_id:05d}.png')
-        Args:
-            frame_id: int, define the mask path
-        Return:
-            binary_segments: dict
-        """
-        # get the path
-        all_objects = sorted(glob.glob(os.path.join(self.video_png_root, "*")))
-        num_objects = len(all_objects)
-        assert num_objects > 0
-
-        # load the masks
-        binary_segments = {}
-        for obj_folder in all_objects:
-            # obj_folder is {video_name}/{obj_id}, obj_id is specified by the name of the folder
-            obj_id = int(obj_folder.split("/")[-1])
-            obj_id = obj_id + 1  # offset 1 as bg is 0
+    def _load_multiple(self, frame_id: int) -> Dict[int, torch.Tensor]:
+        result = {}
+        for obj_folder in sorted(glob.glob(os.path.join(self.video_png_root, "*"))):
+            obj_id = int(obj_folder.split("/")[-1]) + 1
             mask_path = os.path.join(obj_folder, f"{frame_id:05d}.png")
             if os.path.exists(mask_path):
-                mask = np.array(PILImage.open(mask_path))
+                mask = np.array(PILImage.open(mask_path)) > 0
             else:
                 mask = np.zeros((self.H, self.W), dtype=bool)
-            binary_segments[obj_id] = torch.from_numpy(mask > 0)
+            result[obj_id] = torch.from_numpy(mask)
+        return result
 
-        return binary_segments
 
-    def __len__(self):
-        return
-
+# ──────────────────────────────────────────────────────────────────────────────
 
 class NPZSegmentLoader:
-    def __init__(self, masks):
-        """
-        Initialize the NPZSegmentLoader.
-        
-        Args:
-            masks (numpy.ndarray): Array of masks with shape (img_num, H, W).
-        """
-        self.masks = masks
+    """Load per-frame segmentation masks from a pre-loaded numpy array.
 
-    def load(self, frame_idx):
-        """
-        Load the single mask for the given frame index and convert it to binary segments.
+    Used with HECKTOR NPZ files where the ``gts`` array has shape (D, H, W)
+    and contains integer labels (0 = background, 1 = GTVp, 2 = GTVn).
 
-        Args:
-            frame_idx (int): Index of the frame to load.
+    Parameters
+    ----------
+    masks : np.ndarray
+        Integer array of shape (D, H, W).
+    """
 
-        Returns:
-            dict: A dictionary where keys are object IDs and values are binary masks.
+    def __init__(self, masks: np.ndarray) -> None:
+        self.masks = masks   # (D, H, W) uint8
+
+    def load(self, frame_idx: int) -> Dict[int, torch.Tensor]:
+        """Return ``{label_id: binary_mask_tensor}`` for *frame_idx*.
+
+        Parameters
+        ----------
+        frame_idx : int
+
+        Returns
+        -------
+        dict[int, torch.Tensor]  bool tensors of shape (H, W)
         """
         mask = self.masks[frame_idx]
-
-        # Find unique object IDs in the mask, excluding the background (0)
         object_ids = np.unique(mask)
         object_ids = object_ids[object_ids != 0]
+        return {
+            int(oid): torch.from_numpy(mask == oid).bool()
+            for oid in object_ids
+        }
 
-        # Convert into binary segmentation masks for each object
-        binary_segments = {}
-        for obj_id in object_ids:
-            binary_mask = (mask == obj_id)
-            binary_segments[int(obj_id)] = torch.from_numpy(binary_mask).bool()
 
-        return binary_segments
+# ──────────────────────────────────────────────────────────────────────────────
+
+class LazySegments:
+    """Lazy container for SA-1B style segment annotations (loaded on demand)."""
+
+    def __init__(self, data: dict) -> None:
+        self._data = data
+
+    def keys(self):
+        return self._data.keys()
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+
+class JSONSegmentLoader:
+    """Load segment masks from a COCO-style JSON annotation file.
+
+    Parameters
+    ----------
+    json_path : str
+        Path to the JSON file.
+    """
+
+    def __init__(self, json_path: str) -> None:
+        with open(json_path) as f:
+            self._data = json.load(f)
+
+    def load(
+        self,
+        frame_id: int,
+        obj_ids: Optional[list] = None,
+    ) -> Dict[int, torch.Tensor]:
+        """Return masks for *frame_id*, optionally filtered to *obj_ids*.
+
+        Parameters
+        ----------
+        frame_id : int
+        obj_ids : list, optional
+            If provided only return masks whose object IDs are in this list.
+
+        Returns
+        -------
+        dict[int, torch.Tensor]
+        """
+        frame_data = self._data.get(str(frame_id), {})
+        result = {}
+        for obj_id_str, rle in frame_data.items():
+            obj_id = int(obj_id_str)
+            if obj_ids is not None and obj_id not in obj_ids:
+                continue
+            mask = self._decode_rle(rle)
+            result[obj_id] = torch.from_numpy(mask)
+        return result
+
+    @staticmethod
+    def _decode_rle(rle: dict) -> np.ndarray:
+        """Decode an uncompressed RLE dict to a boolean numpy array."""
+        h, w = rle["size"]
+        mask = np.zeros(h * w, dtype=bool)
+        idx, parity = 0, False
+        for count in rle["counts"]:
+            mask[idx : idx + count] = parity
+            idx += count
+            parity = not parity
+        return mask.reshape(w, h).T

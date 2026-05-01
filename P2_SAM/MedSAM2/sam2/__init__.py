@@ -1,8 +1,11 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
+"""
+sam2
+====
+Core MedSAM2 package.
 
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
+On import, Hydra is initialised against this module's ``configs/`` directory
+so that ``compose(config_name=...)`` works from any working directory.
+"""
 
 from hydra import initialize_config_module
 from hydra.core.global_hydra import GlobalHydra

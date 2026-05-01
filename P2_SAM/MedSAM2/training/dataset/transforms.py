@@ -1,14 +1,10 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-
 """
-Transforms and data augmentation for both image + bbox.
+training/dataset/transforms.py
+================================
+Augmentation transforms for the VOS training pipeline.
+All transforms operate on :class:`~training.utils.data_utils.VideoDatapoint`
+objects and are designed to be composed with :class:`ComposeAPI`.
 """
-
-import logging
 
 import random
 from typing import Iterable
@@ -16,127 +12,24 @@ from typing import Iterable
 import torch
 import torchvision.transforms as T
 import torchvision.transforms.functional as F
-import torchvision.transforms.v2.functional as Fv2
-
 from torchvision.transforms import InterpolationMode
 
 from training.utils.data_utils import VideoDatapoint
 
 
-def hflip(datapoint, index):
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────────
 
+def _hflip(datapoint: VideoDatapoint, index: int) -> VideoDatapoint:
     datapoint.frames[index].data = F.hflip(datapoint.frames[index].data)
     for obj in datapoint.frames[index].objects:
         if obj.segment is not None:
             obj.segment = F.hflip(obj.segment)
-
     return datapoint
 
 
-def get_size_with_aspect_ratio(image_size, size, max_size=None):
-    w, h = image_size
-    if max_size is not None:
-        min_original_size = float(min((w, h)))
-        max_original_size = float(max((w, h)))
-        if max_original_size / min_original_size * size > max_size:
-            size = max_size * min_original_size / max_original_size
-
-    if (w <= h and w == size) or (h <= w and h == size):
-        return (h, w)
-
-    if w < h:
-        ow = int(round(size))
-        oh = int(round(size * h / w))
-    else:
-        oh = int(round(size))
-        ow = int(round(size * w / h))
-
-    return (oh, ow)
-
-
-def resize(datapoint, index, size, max_size=None, square=False, v2=False):
-    # size can be min_size (scalar) or (w, h) tuple
-
-    def get_size(image_size, size, max_size=None):
-        if isinstance(size, (list, tuple)):
-            return size[::-1]
-        else:
-            return get_size_with_aspect_ratio(image_size, size, max_size)
-
-    if square:
-        size = size, size
-    else:
-        cur_size = (
-            datapoint.frames[index].data.size()[-2:][::-1]
-            if v2
-            else datapoint.frames[index].data.size
-        )
-        size = get_size(cur_size, size, max_size)
-
-    old_size = (
-        datapoint.frames[index].data.size()[-2:][::-1]
-        if v2
-        else datapoint.frames[index].data.size
-    )
-    if v2:
-        datapoint.frames[index].data = Fv2.resize(
-            datapoint.frames[index].data, size, antialias=True
-        )
-    else:
-        datapoint.frames[index].data = F.resize(datapoint.frames[index].data, size)
-
-    new_size = (
-        datapoint.frames[index].data.size()[-2:][::-1]
-        if v2
-        else datapoint.frames[index].data.size
-    )
-
-    for obj in datapoint.frames[index].objects:
-        if obj.segment is not None:
-            obj.segment = F.resize(obj.segment[None, None], size).squeeze()
-
-    h, w = size
-    datapoint.frames[index].size = (h, w)
-    return datapoint
-
-
-def pad(datapoint, index, padding, v2=False):
-    old_h, old_w = datapoint.frames[index].size
-    h, w = old_h, old_w
-    if len(padding) == 2:
-        # assumes that we only pad on the bottom right corners
-        datapoint.frames[index].data = F.pad(
-            datapoint.frames[index].data, (0, 0, padding[0], padding[1])
-        )
-        h += padding[1]
-        w += padding[0]
-    else:
-        # left, top, right, bottom
-        datapoint.frames[index].data = F.pad(
-            datapoint.frames[index].data,
-            (padding[0], padding[1], padding[2], padding[3]),
-        )
-        h += padding[1] + padding[3]
-        w += padding[0] + padding[2]
-
-    datapoint.frames[index].size = (h, w)
-
-    for obj in datapoint.frames[index].objects:
-        if obj.segment is not None:
-            if v2:
-                if len(padding) == 2:
-                    obj.segment = Fv2.pad(obj.segment, (0, 0, padding[0], padding[1]))
-                else:
-                    obj.segment = Fv2.pad(obj.segment, tuple(padding))
-            else:
-                if len(padding) == 2:
-                    obj.segment = F.pad(obj.segment, (0, 0, padding[0], padding[1]))
-                else:
-                    obj.segment = F.pad(obj.segment, tuple(padding))
-    return datapoint
-
-
-def vflip(datapoint, index):
+def _vflip(datapoint: VideoDatapoint, index: int) -> VideoDatapoint:
     datapoint.frames[index].data = F.vflip(datapoint.frames[index].data)
     for obj in datapoint.frames[index].objects:
         if obj.segment is not None:
@@ -144,373 +37,259 @@ def vflip(datapoint, index):
     return datapoint
 
 
-class RandomVerticalFlip:
-    def __init__(self, consistent_transform, p=0.5):
-        self.p = p
-        self.consistent_transform = consistent_transform
-
-    def __call__(self, datapoint, **kwargs):
-        if self.consistent_transform:
-            if random.random() < self.p:
-                for i in range(len(datapoint.frames)):
-                    datapoint = vflip(datapoint, i)
-            return datapoint
-        for i in range(len(datapoint.frames)):
-            if random.random() < self.p:
-                datapoint = vflip(datapoint, i)
-        return datapoint
+def _get_size_with_aspect_ratio(image_size, size, max_size=None):
+    w, h = image_size
+    if max_size is not None:
+        min_dim = float(min(w, h))
+        max_dim = float(max(w, h))
+        if max_dim / min_dim * size > max_size:
+            size = int(max_size * min_dim / max_dim)
+    if (w <= h and w == size) or (h <= w and h == size):
+        return h, w
+    if w < h:
+        return int(round(size * h / w)), int(round(size))
+    return int(round(size)), int(round(size * w / h))
 
 
-class RandomHorizontalFlip:
-    def __init__(self, consistent_transform, p=0.5):
-        self.p = p
-        self.consistent_transform = consistent_transform
-
-    def __call__(self, datapoint, **kwargs):
-        if self.consistent_transform:
-            if random.random() < self.p:
-                for i in range(len(datapoint.frames)):
-                    datapoint = hflip(datapoint, i)
-            return datapoint
-        for i in range(len(datapoint.frames)):
-            if random.random() < self.p:
-                datapoint = hflip(datapoint, i)
-        return datapoint
-
-
-class RandomResizeAPI:
-    def __init__(
-        self, sizes, consistent_transform, max_size=None, square=False, v2=False
-    ):
-        if isinstance(sizes, int):
-            sizes = (sizes,)
-        assert isinstance(sizes, Iterable)
-        self.sizes = list(sizes)
-        self.max_size = max_size
-        self.square = square
-        self.consistent_transform = consistent_transform
-        self.v2 = v2
-
-    def __call__(self, datapoint, **kwargs):
-        if self.consistent_transform:
-            size = random.choice(self.sizes)
-            for i in range(len(datapoint.frames)):
-                datapoint = resize(
-                    datapoint, i, size, self.max_size, square=self.square, v2=self.v2
-                )
-            return datapoint
-        for i in range(len(datapoint.frames)):
-            size = random.choice(self.sizes)
-            datapoint = resize(
-                datapoint, i, size, self.max_size, square=self.square, v2=self.v2
-            )
-        return datapoint
+def _resize(datapoint: VideoDatapoint, index: int, size, max_size=None,
+            square: bool = False) -> VideoDatapoint:
+    if square:
+        target = (size, size)
+    else:
+        cur_size = datapoint.frames[index].data.size  # PIL (w, h)
+        oh, ow = _get_size_with_aspect_ratio(cur_size, size, max_size)
+        target = (oh, ow)
+    datapoint.frames[index].data = F.resize(datapoint.frames[index].data, target)
+    for obj in datapoint.frames[index].objects:
+        if obj.segment is not None:
+            obj.segment = F.resize(obj.segment[None, None], target).squeeze()
+    datapoint.frames[index].size = target
+    return datapoint
 
 
-class ToTensorAPI:
-    def __init__(self, v2=False):
-        self.v2 = v2
-
-    def __call__(self, datapoint: VideoDatapoint, **kwargs):
-        for img in datapoint.frames:
-            if self.v2:
-                img.data = Fv2.to_image_tensor(img.data)
-            else:
-                img.data = F.to_tensor(img.data)
-        return datapoint
-
-
-class NormalizeAPI:
-    def __init__(self, mean, std, v2=False):
-        self.mean = mean
-        self.std = std
-        self.v2 = v2
-
-    def __call__(self, datapoint: VideoDatapoint, **kwargs):
-        for img in datapoint.frames:
-            if self.v2:
-                img.data = Fv2.convert_image_dtype(img.data, torch.float32)
-                img.data = Fv2.normalize(img.data, mean=self.mean, std=self.std)
-            else:
-                img.data = F.normalize(img.data, mean=self.mean, std=self.std)
-
-        return datapoint
-
+# ──────────────────────────────────────────────────────────────────────────────
+# Public transform classes
+# ──────────────────────────────────────────────────────────────────────────────
 
 class ComposeAPI:
-    def __init__(self, transforms):
+    """Apply a sequence of transforms to a :class:`VideoDatapoint`."""
+
+    def __init__(self, transforms) -> None:
         self.transforms = transforms
 
-    def __call__(self, datapoint, **kwargs):
+    def __call__(self, datapoint: VideoDatapoint, **kwargs) -> VideoDatapoint:
         for t in self.transforms:
             datapoint = t(datapoint, **kwargs)
         return datapoint
 
-    def __repr__(self):
-        format_string = self.__class__.__name__ + "("
-        for t in self.transforms:
-            format_string += "\n"
-            format_string += "    {0}".format(t)
-        format_string += "\n)"
-        return format_string
 
+class RandomHorizontalFlip:
+    """Random horizontal flip applied consistently or per-frame.
 
-class RandomGrayscale:
-    def __init__(self, consistent_transform, p=0.5):
+    Parameters
+    ----------
+    consistent_transform : bool  same decision for all frames when True
+    p : float  flip probability
+    """
+
+    def __init__(self, consistent_transform: bool, p: float = 0.5) -> None:
         self.p = p
         self.consistent_transform = consistent_transform
-        self.Grayscale = T.Grayscale(num_output_channels=3)
 
-    def __call__(self, datapoint: VideoDatapoint, **kwargs):
+    def __call__(self, datapoint: VideoDatapoint, **kwargs) -> VideoDatapoint:
         if self.consistent_transform:
             if random.random() < self.p:
-                for img in datapoint.frames:
-                    img.data = self.Grayscale(img.data)
-            return datapoint
-        for img in datapoint.frames:
+                for i in range(len(datapoint.frames)):
+                    datapoint = _hflip(datapoint, i)
+        else:
+            for i in range(len(datapoint.frames)):
+                if random.random() < self.p:
+                    datapoint = _hflip(datapoint, i)
+        return datapoint
+
+
+class RandomVerticalFlip:
+    """Random vertical flip."""
+
+    def __init__(self, consistent_transform: bool, p: float = 0.5) -> None:
+        self.p = p
+        self.consistent_transform = consistent_transform
+
+    def __call__(self, datapoint: VideoDatapoint, **kwargs) -> VideoDatapoint:
+        if self.consistent_transform:
             if random.random() < self.p:
-                img.data = self.Grayscale(img.data)
+                for i in range(len(datapoint.frames)):
+                    datapoint = _vflip(datapoint, i)
+        else:
+            for i in range(len(datapoint.frames)):
+                if random.random() < self.p:
+                    datapoint = _vflip(datapoint, i)
+        return datapoint
+
+
+class RandomResizeAPI:
+    """Randomly resize to one of the given sizes.
+
+    Parameters
+    ----------
+    sizes : int or iterable[int]  candidate sizes
+    consistent_transform : bool
+    max_size : int or None
+    square : bool  force square output
+    """
+
+    def __init__(self, sizes, consistent_transform: bool, max_size=None, square=False) -> None:
+        if isinstance(sizes, int):
+            sizes = (sizes,)
+        self.sizes = list(sizes)
+        self.max_size = max_size
+        self.square = square
+        self.consistent_transform = consistent_transform
+
+    def __call__(self, datapoint: VideoDatapoint, **kwargs) -> VideoDatapoint:
+        if self.consistent_transform:
+            size = random.choice(self.sizes)
+            for i in range(len(datapoint.frames)):
+                datapoint = _resize(datapoint, i, size, self.max_size, self.square)
+        else:
+            for i in range(len(datapoint.frames)):
+                size = random.choice(self.sizes)
+                datapoint = _resize(datapoint, i, size, self.max_size, self.square)
+        return datapoint
+
+
+class ToTensorAPI:
+    """Convert PIL frame data to float tensor."""
+
+    def __call__(self, datapoint: VideoDatapoint, **kwargs) -> VideoDatapoint:
+        for img in datapoint.frames:
+            img.data = F.to_tensor(img.data)
+        return datapoint
+
+
+class NormalizeAPI:
+    """Normalise frame tensors with ImageNet mean and std."""
+
+    def __init__(self, mean, std) -> None:
+        self.mean = mean
+        self.std = std
+
+    def __call__(self, datapoint: VideoDatapoint, **kwargs) -> VideoDatapoint:
+        for img in datapoint.frames:
+            img.data = F.normalize(img.data, mean=self.mean, std=self.std)
         return datapoint
 
 
 class ColorJitter:
-    def __init__(self, consistent_transform, brightness, contrast, saturation, hue):
-        self.consistent_transform = consistent_transform
-        self.brightness = (
-            brightness
-            if isinstance(brightness, list)
-            else [max(0, 1 - brightness), 1 + brightness]
-        )
-        self.contrast = (
-            contrast
-            if isinstance(contrast, list)
-            else [max(0, 1 - contrast), 1 + contrast]
-        )
-        self.saturation = (
-            saturation
-            if isinstance(saturation, list)
-            else [max(0, 1 - saturation), 1 + saturation]
-        )
-        self.hue = hue if isinstance(hue, list) or hue is None else ([-hue, hue])
+    """Random colour jitter applied consistently or per-frame.
 
-    def __call__(self, datapoint: VideoDatapoint, **kwargs):
+    Parameters
+    ----------
+    consistent_transform : bool
+    brightness, contrast, saturation : float  jitter strength
+    hue : float or None
+    """
+
+    def __init__(self, consistent_transform: bool, brightness=0, contrast=0,
+                 saturation=0, hue=None) -> None:
+        self.consistent_transform = consistent_transform
+
+        def _range(v):
+            if isinstance(v, list):
+                return v
+            return [max(0, 1 - v), 1 + v]
+
+        self.brightness = _range(brightness)
+        self.contrast = _range(contrast)
+        self.saturation = _range(saturation)
+        self.hue = hue if isinstance(hue, list) or hue is None else [-hue, hue]
+
+    def __call__(self, datapoint: VideoDatapoint, **kwargs) -> VideoDatapoint:
         if self.consistent_transform:
-            # Create a color jitter transformation params
-            (
-                fn_idx,
-                brightness_factor,
-                contrast_factor,
-                saturation_factor,
-                hue_factor,
-            ) = T.ColorJitter.get_params(
-                self.brightness, self.contrast, self.saturation, self.hue
-            )
+            params = T.ColorJitter.get_params(self.brightness, self.contrast, self.saturation, self.hue)
         for img in datapoint.frames:
             if not self.consistent_transform:
-                (
-                    fn_idx,
-                    brightness_factor,
-                    contrast_factor,
-                    saturation_factor,
-                    hue_factor,
-                ) = T.ColorJitter.get_params(
-                    self.brightness, self.contrast, self.saturation, self.hue
-                )
+                params = T.ColorJitter.get_params(self.brightness, self.contrast, self.saturation, self.hue)
+            fn_idx, bf, cf, sf, hf = params
             for fn_id in fn_idx:
-                if fn_id == 0 and brightness_factor is not None:
-                    img.data = F.adjust_brightness(img.data, brightness_factor)
-                elif fn_id == 1 and contrast_factor is not None:
-                    img.data = F.adjust_contrast(img.data, contrast_factor)
-                elif fn_id == 2 and saturation_factor is not None:
-                    img.data = F.adjust_saturation(img.data, saturation_factor)
-                elif fn_id == 3 and hue_factor is not None:
-                    img.data = F.adjust_hue(img.data, hue_factor)
+                if fn_id == 0 and bf is not None:
+                    img.data = F.adjust_brightness(img.data, bf)
+                elif fn_id == 1 and cf is not None:
+                    img.data = F.adjust_contrast(img.data, cf)
+                elif fn_id == 2 and sf is not None:
+                    img.data = F.adjust_saturation(img.data, sf)
+                elif fn_id == 3 and hf is not None:
+                    img.data = F.adjust_hue(img.data, hf)
+        return datapoint
+
+
+class RandomGrayscale:
+    """Random per-frame or consistent conversion to 3-channel grayscale."""
+
+    def __init__(self, consistent_transform: bool, p: float = 0.05) -> None:
+        self.p = p
+        self.consistent_transform = consistent_transform
+        self.Grayscale = T.Grayscale(num_output_channels=3)
+
+    def __call__(self, datapoint: VideoDatapoint, **kwargs) -> VideoDatapoint:
+        if self.consistent_transform:
+            if random.random() < self.p:
+                for img in datapoint.frames:
+                    img.data = self.Grayscale(img.data)
+        else:
+            for img in datapoint.frames:
+                if random.random() < self.p:
+                    img.data = self.Grayscale(img.data)
         return datapoint
 
 
 class RandomAffine:
-    def __init__(
-        self,
-        degrees,
-        consistent_transform,
-        scale=None,
-        translate=None,
-        shear=None,
-        image_mean=(123, 116, 103),
-        log_warning=True,
-        num_tentatives=1,
-        image_interpolation="bicubic",
-        p=1.0,
-    ):
-        """
-        The mask is required for this transform.
-        if consistent_transform if True, then the same random affine is applied to all frames and masks.
-        """
-        self.degrees = degrees if isinstance(degrees, list) else ([-degrees, degrees])
+    """Random affine transform (rotation, shear) applied to frames and masks.
+
+    Parameters
+    ----------
+    degrees : float or list[float]
+    consistent_transform : bool
+    shear : float or None
+    image_interpolation : str  ``'bilinear'`` or ``'bicubic'``
+    p : float  probability of applying the transform
+    """
+
+    def __init__(self, degrees, consistent_transform: bool, scale=None,
+                 translate=None, shear=None, image_mean=(123, 116, 103),
+                 image_interpolation="bicubic", p=1.0) -> None:
+        self.degrees = degrees if isinstance(degrees, list) else [-degrees, degrees]
         self.scale = scale
-        self.shear = (
-            shear if isinstance(shear, list) else ([-shear, shear] if shear else None)
-        )
+        self.shear = shear if isinstance(shear, list) else ([-shear, shear] if shear else None)
         self.translate = translate
         self.fill_img = image_mean
         self.consistent_transform = consistent_transform
-        self.log_warning = log_warning
-        self.num_tentatives = num_tentatives
         self.p = p
+        self.image_interpolation = (
+            InterpolationMode.BICUBIC if image_interpolation == "bicubic"
+            else InterpolationMode.BILINEAR
+        )
 
-        if image_interpolation == "bicubic":
-            self.image_interpolation = InterpolationMode.BICUBIC
-        elif image_interpolation == "bilinear":
-            self.image_interpolation = InterpolationMode.BILINEAR
-        else:
-            raise NotImplementedError
-
-    def __call__(self, datapoint: VideoDatapoint, **kwargs):
+    def __call__(self, datapoint: VideoDatapoint, **kwargs) -> VideoDatapoint:
         if random.random() > self.p:
             return datapoint
-
-        for _tentative in range(self.num_tentatives):
-            res = self.transform_datapoint(datapoint)
-            if res is not None:
-                return res
-
-        if self.log_warning:
-            logging.warning(
-                f"Skip RandomAffine for zero-area mask in first frame after {self.num_tentatives} tentatives"
-            )
-        return datapoint
-
-    def transform_datapoint(self, datapoint: VideoDatapoint):
-        _, height, width = F.get_dimensions(datapoint.frames[0].data)
-        img_size = [width, height]
-
+        _, H, W = F.get_dimensions(datapoint.frames[0].data)
         if self.consistent_transform:
-            # Create a random affine transformation
             affine_params = T.RandomAffine.get_params(
-                degrees=self.degrees,
-                translate=self.translate,
-                scale_ranges=self.scale,
-                shears=self.shear,
-                img_size=img_size,
+                degrees=self.degrees, translate=self.translate,
+                scale_ranges=self.scale, shears=self.shear, img_size=[W, H],
             )
-
-        for img_idx, img in enumerate(datapoint.frames):
-            this_masks = [
-                obj.segment.unsqueeze(0) if obj.segment is not None else None
-                for obj in img.objects
-            ]
+        for img in datapoint.frames:
             if not self.consistent_transform:
-                # if not consistent we create a new affine params for every frame&mask pair Create a random affine transformation
                 affine_params = T.RandomAffine.get_params(
-                    degrees=self.degrees,
-                    translate=self.translate,
-                    scale_ranges=self.scale,
-                    shears=self.shear,
-                    img_size=img_size,
+                    degrees=self.degrees, translate=self.translate,
+                    scale_ranges=self.scale, shears=self.shear, img_size=[W, H],
                 )
-
-            transformed_bboxes, transformed_masks = [], []
-            for i in range(len(img.objects)):
-                if this_masks[i] is None:
-                    transformed_masks.append(None)
-                    # Dummy bbox for a dummy target
-                    transformed_bboxes.append(torch.tensor([[0, 0, 1, 1]]))
-                else:
-                    transformed_mask = F.affine(
-                        this_masks[i],
-                        *affine_params,
-                        interpolation=InterpolationMode.NEAREST,
-                        fill=0.0,
-                    )
-                    if img_idx == 0 and transformed_mask.max() == 0:
-                        # We are dealing with a video and the object is not visible in the first frame
-                        # Return the datapoint without transformation
-                        return datapoint
-                    transformed_masks.append(transformed_mask.squeeze())
-
-            for i in range(len(img.objects)):
-                img.objects[i].segment = transformed_masks[i]
-
-            img.data = F.affine(
-                img.data,
-                *affine_params,
-                interpolation=self.image_interpolation,
-                fill=self.fill_img,
-            )
-        return datapoint
-
-
-class RandomGaussianNoise:
-    def __init__(self, consistent_transform, mean=0., std=0.1, p=0.5):
-        """
-        Args:
-            consistent_transform (bool): Whether to use the same noise parameters for all frames in the video
-            mean (float): Mean of the Gaussian noise
-            std (float): Standard deviation of the Gaussian noise 
-            p (float): Probability of applying noise
-        """
-        self.consistent_transform = consistent_transform
-        self.mean = mean
-        self.std = std
-        self.p = p
-
-    def __call__(self, datapoint: VideoDatapoint, **kwargs):
-        if self.consistent_transform:
-            if random.random() < self.p:
-                noise_std = random.uniform(0, self.std)
-                for img in datapoint.frames:
-                    # Convert PIL to tensor
-                    img_tensor = F.to_tensor(img.data)
-                    # Add noise
-                    noise = torch.randn_like(img_tensor) * noise_std + self.mean
-                    noisy_img = torch.clamp(img_tensor + noise, 0, 1)
-                    # Convert back to PIL
-                    img.data = F.to_pil_image(noisy_img)
-            return datapoint
-        for img in datapoint.frames:
-            if random.random() < self.p:
-                noise_std = random.uniform(0, self.std)
-                # Convert PIL to tensor
-                img_tensor = F.to_tensor(img.data)
-                # Add noise
-                noise = torch.randn_like(img_tensor) * noise_std + self.mean
-                noisy_img = torch.clamp(img_tensor + noise, 0, 1)
-                # Convert back to PIL
-                img.data = F.to_pil_image(noisy_img)
-        return datapoint
-
-
-class RandomGaussianBlur:
-    def __init__(self, consistent_transform, kernel_size, sigma=(0.1, 2.0), p=0.5):
-        """
-        Args:
-            consistent_transform (bool): Whether to use the same blur parameters for all frames
-            kernel_size (int): Gaussian kernel size. Must be odd and positive
-            sigma (tuple of float): Range of standard deviation for Gaussian kernel
-            p (float): Probability of applying blur
-        """
-        if isinstance(kernel_size, int):
-            kernel_size = (kernel_size, kernel_size)
-        if isinstance(sigma, (float, int)):
-            sigma = (sigma, sigma)
-            
-        self.consistent_transform = consistent_transform
-        self.kernel_size = kernel_size
-        self.sigma = sigma
-        self.p = p
-
-    def __call__(self, datapoint: VideoDatapoint, **kwargs):
-        if self.consistent_transform:
-            if random.random() < self.p:
-                # Sample sigma once for all frames
-                sigma = random.uniform(self.sigma[0], self.sigma[1])
-                for img in datapoint.frames:
-                    img.data = F.gaussian_blur(img.data, self.kernel_size, [sigma, sigma])
-            return datapoint
-            
-        for img in datapoint.frames:
-            if random.random() < self.p:
-                # Sample sigma independently for each frame
-                sigma = random.uniform(self.sigma[0], self.sigma[1])
-                img.data = F.gaussian_blur(img.data, self.kernel_size, [sigma, sigma])
+            img.data = F.affine(img.data, *affine_params,
+                                interpolation=self.image_interpolation, fill=self.fill_img)
+            for obj in img.objects:
+                if obj.segment is not None:
+                    m = F.affine(obj.segment.unsqueeze(0), *affine_params,
+                                 interpolation=InterpolationMode.NEAREST, fill=0.0)
+                    obj.segment = m.squeeze()
         return datapoint
