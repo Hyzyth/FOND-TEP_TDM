@@ -1,183 +1,203 @@
-# MedSAM2
-<div align="center">
+# HECKTOR MedSAM2
 
-<img src="https://github.com/user-attachments/assets/18937bf5-619d-4ae6-a64c-d9900369a7e0" alt="MedSAM2 - Logo" width="30%">
+MedSAM2 fine-tuned for **HECKTOR Task-1**: automatic segmentation of primary
+(GTVp) and nodal (GTVn) head-and-neck tumours from dual-modality **CT + PET**
+volumes.
 
-**Segment Anything in 3D Medical Images and Videos**
+---
 
-</div>
-<div align="center">
- <table align="center">
-   <tr>
-     <td><a href="https://arxiv.org/abs/2504.03600" target="_blank"><img src="https://img.shields.io/badge/arXiv-Paper-FF6B6B?style=for-the-badge&logo=arxiv&logoColor=white" alt="Paper"></a></td>
-     <td><a href="https://medsam2.github.io/" target="_blank"><img src="https://img.shields.io/badge/Project-Page-4285F4?style=for-the-badge&logoColor=white" alt="Project"></a></td>
-     <td><a href="https://github.com/bowang-lab/MedSAM2" target="_blank"><img src="https://img.shields.io/badge/GitHub-Code-181717?style=for-the-badge&logo=github&logoColor=white" alt="Code"></a></td>
-     <td><a href="https://huggingface.co/wanglab/MedSAM2" target="_blank"><img src="https://img.shields.io/badge/HuggingFace-Model-FFBF00?style=for-the-badge&logo=huggingface&logoColor=white" alt="HuggingFace Model"></a></td>
-   </tr>
-   <tr>
-     <td><a href="https://medsam-datasetlist.github.io/" target="_blank"><img src="https://img.shields.io/badge/Dataset-List-00B89E?style=for-the-badge" alt="Dataset List"></a></td>
-     <td><a href="https://huggingface.co/datasets/wanglab/CT_DeepLesion-MedSAM2" target="_blank"><img src="https://img.shields.io/badge/Dataset-CT__DeepLesion-28A745?style=for-the-badge" alt="CT_DeepLesion-MedSAM2"></a></td>
-     <td><a href="https://huggingface.co/datasets/wanglab/LLD-MMRI-MedSAM2" target="_blank"><img src="https://img.shields.io/badge/Dataset-LLD--MMRI-FF6B6B?style=for-the-badge" alt="LLD-MMRI-MedSAM2"></a></td>
-     <td><a href="https://github.com/bowang-lab/MedSAMSlicer/tree/MedSAM2" target="_blank"><img src="https://img.shields.io/badge/3D_Slicer-Plugin-e2006a?style=for-the-badge" alt="3D Slicer"></a></td>
-   </tr>
-   <tr>
-     <td><a href="https://github.com/bowang-lab/MedSAM2/blob/main/app.py" target="_blank"><img src="https://img.shields.io/badge/Gradio-Demo-F9D371?style=for-the-badge&logo=gradio&logoColor=white" alt="Gradio App"></a></td>
-     <td><a href="https://colab.research.google.com/drive/1MKna9Sg9c78LNcrVyG58cQQmaePZq2k2?usp=sharing" target="_blank"><img src="https://img.shields.io/badge/Colab-CT--Seg--Demo-F9AB00?style=for-the-badge&logo=googlecolab&logoColor=white" alt="CT-Seg-Demo"></a></td>
-     <td><a href="https://colab.research.google.com/drive/16niRHqdDZMCGV7lKuagNq_r_CEHtKY1f?usp=sharing" target="_blank"><img src="https://img.shields.io/badge/Colab-Video--Seg--Demo-F9AB00?style=for-the-badge&logo=googlecolab&logoColor=white" alt="Video-Seg-Demo"></a></td>
-     <td><a href="https://github.com/bowang-lab/MedSAM2?tab=readme-ov-file#bibtex" target="_blank"><img src="https://img.shields.io/badge/Paper-BibTeX-9370DB?style=for-the-badge&logoColor=white" alt="BibTeX"></a></td>
-   </tr>
- </table>
-</div>
+## Project structure
 
-Welcome to join our [mailing list](https://forms.gle/bLxGb5SEpdLCUChQ7) to get updates. We’re also actively looking to collaborate on annotating new large-scale 3D datasets. If you have unlabeled medical images or videos and want to share them with the community, let’s connect!
+```
+hecktor_medsam2/
+├── data_preparation/
+│   ├── __init__.py
+│   └── prepare_hecktor_npz.py    ← convert NIfTI → NPZ
+│
+├── sam2/                          ← core model (adapted from MedSAM2)
+│   ├── __init__.py
+│   ├── build_sam.py
+│   ├── sam2_video_predictor_npz.py
+│   ├── sam2_image_predictor.py
+│   ├── configs/
+│   │   ├── sam2.1_hiera_t512.yaml          ← base inference config
+│   │   └── sam2.1_hiera_tiny_hecktor.yaml  ← HECKTOR fine-tuning config
+│   ├── modeling/
+│   │   ├── sam2_base.py
+│   │   ├── sam2_utils.py
+│   │   ├── memory_attention.py
+│   │   ├── memory_encoder.py
+│   │   ├── position_encoding.py
+│   │   ├── backbones/
+│   │   │   ├── hieradet.py
+│   │   │   ├── image_encoder.py
+│   │   │   └── utils.py
+│   │   └── sam/
+│   │       ├── mask_decoder.py
+│   │       ├── prompt_encoder.py
+│   │       └── transformer.py
+│   ├── utils/
+│   │   ├── amg.py
+│   │   ├── misc.py
+│   │   └── transforms.py
+│   └── csrc/
+│       └── connected_components.cu
+│
+├── training/
+│   ├── __init__.py
+│   ├── train.py
+│   ├── trainer.py
+│   ├── optimizer.py
+│   ├── loss_fns.py
+│   ├── model/
+│   │   ├── __init__.py
+│   │   └── sam2.py               ← SAM2Train
+│   ├── dataset/
+│   │   ├── __init__.py
+│   │   ├── hecktor_dataset.py    ← NEW: CT+PET dual-modality loader
+│   │   ├── vos_dataset.py
+│   │   ├── vos_raw_dataset.py
+│   │   ├── vos_sampler.py
+│   │   ├── vos_segment_loader.py
+│   │   ├── sam2_datasets.py
+│   │   └── transforms.py
+│   └── utils/
+│       ├── __init__.py
+│       ├── data_utils.py
+│       ├── checkpoint_utils.py
+│       ├── distributed.py
+│       ├── logger.py
+│       └── train_utils.py
+│
+├── inference/
+│   ├── __init__.py
+│   ├── infer_hecktor.py          ← NEW: full inference pipeline
+│   └── evaluate_hecktor.py       ← NEW: DSC evaluation
+│
+├── scripts/
+│   ├── download_checkpoints.sh
+│   ├── train_hecktor.sh
+│   └── infer_hecktor.sh
+│
+├── setup.py
+└── README.md
+```
 
-## Updates
+---
 
-- 20250705: Release Efficient MedSAM2 baseline for FLARE 2025 Pan-cancer segmentation challenge [RECIST-to-3D](https://huggingface.co/datasets/FLARE-MedFM/FLARE-Task1-PancancerRECIST-to-3D)
-- 20250423: Release lung lesion segmentation dataset [LUNA25-MedSAM2](https://huggingface.co/datasets/wanglab/LUNA25-MedSAM2) for [LUNA25](https://luna25.grand-challenge.org/)
+## Label convention
 
-## Installation 
+| Value | Structure |
+|-------|-----------|
+| 0     | Background |
+| 1     | GTVp (primary tumour) |
+| 2     | GTVn (nodal tumour, may be absent) |
 
-- Create a virtual environment: `conda create -n medsam2 python=3.12 -y` and `conda activate medsam2` 
-- Install [PyTorch](https://pytorch.org/get-started/locally/): `pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu124` (Linux CUDA 12.4)
-- Download code `git clone https://github.com/bowang-lab/MedSAM2.git && cd MedSAM2` and run `pip install -e ".[dev]"`
-- Download checkpoints: `bash download.sh`
-- Optional: Please install the following dependencies for gradio
+---
+
+## Quick start
+
+### 1 – Install
 
 ```bash
-sudo apt-get update
-sudo apt-get install ffmpeg
-pip install gradio==3.38.0
-pip install numpy==1.26.3 
-pip install ffmpeg-python 
-pip install moviepy
+cd hecktor_medsam2
+pip install -e ".[train]"
+# Optional CUDA extension for hole-filling post-processing:
+pip install -e ".[train]" --no-build-isolation
 ```
 
-## Download annotated datasets
-
-- [CT_DeepLesion-MedSAM2](https://huggingface.co/datasets/wanglab/CT_DeepLesion-MedSAM2)
-
-- [LLD-MMRI-MedSAM2](https://huggingface.co/datasets/wanglab/LLD-MMRI-MedSAM2) 
-
-- [RVENet-MedSAM2](https://huggingface.co/datasets/wanglab/RVENet-MedSAM2)
-
-Note: Please also cite the raw [DeepLesion](https://doi.org/10.1117/1.JMI.5.3.036501), [LLD-MMRI](https://www.sciencedirect.com/science/article/pii/S0893608025001078) and [RVENET](https://rvenet.github.io/dataset/) papers when using these datasets. 
-
-
-## Inference
-
-### 3D medical image segmentation
-
-- [Colab](https://colab.research.google.com/drive/1MKna9Sg9c78LNcrVyG58cQQmaePZq2k2?usp=sharing): [MedSAM2_inference_CT_Lesion_Demo.ipynb](notebooks/MedSAM2_inference_CT_Lesion.ipynb)
-
-- CMD
+### 2 – Download checkpoints
 
 ```bash
-python medsam2_infer_3D_CT.py -i CT_DeepLesion/images -o CT_DeepLesion/segmentation
+bash scripts/download_checkpoints.sh
+# Checkpoints saved to /data/ethan/MedSAM2/checkpoints/
 ```
 
-### Medical video segmentation
-
-- [Colab](https://colab.research.google.com/drive/16niRHqdDZMCGV7lKuagNq_r_CEHtKY1f?usp=sharing): [MedSAM2_Inference_Video_Demo.ipynb](notebooks/MedSAM2_Inference_Video.ipynb)
-
-
-- CMD
+### 3 – Prepare data
 
 ```bash
-python medsam2_infer_video.py -i input_video_path -m input_mask_path -o output_video_path 
+python data_preparation/prepare_hecktor_npz.py \
+    --data_dir /data/santiago/HECKTOR_data/Task_1_segmentation \
+    --output_dir /data/ethan/MedSAM2/hecktor_npz \
+    --val_ratio 0.2 \
+    --ct_low -200 --ct_high 800
 ```
 
+This creates:
+```
+/data/ethan/MedSAM2/hecktor_npz/
+    train/{patient_id}.npz
+    val/{patient_id}.npz
+    data_split.json
+```
 
+Each NPZ contains `ct_imgs`, `pet_imgs`, `gts`, `spacing`.
 
-
-### Gradio demo
+### 4 – Fine-tune
 
 ```bash
-python app.py
+bash scripts/train_hecktor.sh
+# or with 4 GPUs:
+NUM_GPUS=4 bash scripts/train_hecktor.sh
 ```
 
-## Training MedSAM2
-Use [FLARE25 pan-cancer CT dataset](https://huggingface.co/datasets/FLARE-MedFM/FLARE-Task1-PancancerRECIST-to-3D) as an example. 
-- Download [sam2.1_hiera_tiny.pt](https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_tiny.pt) to `checkpoints`
-- Add dataset information in `sam2/configs/sam2.1_hiera_tiny512_FLARE_RECIST.yaml`: `data` -> `train` -> `datasets`
-- Set `train_video_batch_size` based on the GPU memory
+Logs and checkpoints saved to `/data/ethan/MedSAM2/exp_log/hecktor_finetune/`.
 
+### 5 – Run inference + evaluation
 
 ```bash
-sh single_node_train_medsam2.sh
+bash scripts/infer_hecktor.sh
+# Override checkpoint:
+CHECKPOINT=/data/ethan/MedSAM2/exp_log/hecktor_finetune/checkpoints/checkpoint_100.pt \
+    bash scripts/infer_hecktor.sh
 ```
 
-- multi-node training
+---
 
-```bash
-sbatch multi_node_train.sh
-```
+## Input modality fusion
 
-- inference with RECIST marker (simulate a box prompt on middle slice)
+CT and PET are fused into a 3-channel tensor `[CT, PET, PET]` before being
+passed to the Hiera backbone. Both channels are normalised to `[0, 1]` then
+standardised with ImageNet statistics `(mean=[0.485, 0.456, 0.406],
+std=[0.229, 0.224, 0.225])`.
 
-```bash
-python medsam2_infer_CT_lesion_npz_recist.py
-```
+---
 
-## Training Efficient MedSAM2
+## Inference strategy
 
-- Train Efficient MedSAM2 on [FLARE25 pan-cancer CT dataset](https://huggingface.co/datasets/FLARE-MedFM/FLARE-Task1-PancancerRECIST-to-3D) for CPU-based inference
+For each label (GTVp, GTVn) independently:
+1. Find the **key slice** = axial slice with the largest annotation area.
+2. Derive a **bounding-box prompt** from the GT mask on the key slice.
+3. Run **forward propagation** (key slice → last slice).
+4. Re-initialise and run **reverse propagation** (key slice → first slice).
+5. Merge both passes via logical OR.
 
-```bash
-sh single_node_train_eff_medsam2_FLARE25.sh
-```
+---
 
-- Inference with RECIST marker on the FLARE25 pan-cancer [validation dataset](https://huggingface.co/datasets/FLARE-MedFM/FLARE-Task1-PancancerRECIST-to-3D/tree/main/validation_npz/validation_public_npz). 
+## Evaluation
 
-```python
-npz = np.load('path to/CT_Lesion_FLARE23Ts_0057.npz', allow_pickle=True)
-print(npz.keys())
-imgs = npz['imgs'] # (D, W, H), [0, 255]
-recist = npz['recist'] # (D, W, H), binary RECIST marker on tumor middle slice {0, 1}
-gts = npz['gts'] # (D, W, H), 3D tumor ground truth mask. It will be not available in the testing set
-```
-
-> simulate a box prompt on middle slice
-
-```bash
-python eff_medsam2_infer_CT_lesion_npz_recist.py
-```
-
-
-## Acknowledgements
-
-- We highly appreciate all the challenge organizers and dataset owners for providing the public datasets to the community.
-- We thank Meta AI for making the source code of [SAM2](https://github.com/facebookresearch/sam2) and [EfficientTAM](https://github.com/yformer/EfficientTAM) publicly available. Please also cite these papers when using MedSAM2. 
-
-
-## Bibtex
-
-```bash
-@article{MedSAM2,
-    title={MedSAM2: Segment Anything in 3D Medical Images and Videos},
-    author={Ma, Jun and Yang, Zongxin and Kim, Sumin and Chen, Bihui and Baharoon, Mohammed and Fallahpour, Adibvafa and Asakereh, Reza and Lyu, Hongwei and Wang, Bo},
-    journal={arXiv preprint arXiv:2504.03600},
-    year={2025}
-}
-```
-Please also cite SAM2
-```
-@inproceedings{SAM2,
-title={{SAM} 2: Segment Anything in Images and Videos},
-    author={Nikhila Ravi and Valentin Gabeur and Yuan-Ting Hu and Ronghang Hu and Chaitanya Ryali and Tengyu Ma and Haitham Khedr and Roman R{\"a}dle and Chloe Rolland and Laura Gustafson and Eric Mintun and Junting Pan and Kalyan Vasudev Alwala and Nicolas Carion and Chao-Yuan Wu and Ross Girshick and Piotr Dollar and Christoph Feichtenhofer},
-    booktitle={International Conference on Learning Representations},
-    year={2025}
-}
-```
-
-and EfficientTAM
+Segmentation performance is measured by the **Dice Similarity Coefficient
+(DSC)** for GTVp and GTVn separately; the final score is their mean.
 
 ```
-@article{xiong2024efficienttam,
-    title={Efficient Track Anything},
-    author={Yunyang Xiong, Chong Zhou, Xiaoyu Xiang, Lemeng Wu, Chenchen Zhu, Zechun Liu, Saksham Suri, Balakrishnan Varadarajan, Ramya Akula, Forrest Iandola, Raghuraman Krishnamoorthi, Bilge Soran, Vikas Chandra},
-    journal={preprint arXiv:2411.18933},
-    year={2024}
-}
+DSC = 2·|P∩G| / (|P| + |G|)
 ```
 
+Patients where GTVn is absent are excluded from the GTVn mean.
+
+---
+
+## Key files modified vs original MedSAM2
+
+| File | Change |
+|------|--------|
+| `training/dataset/hecktor_dataset.py` | **NEW** – dual-modality CT+PET loader |
+| `inference/infer_hecktor.py` | **NEW** – HECKTOR inference pipeline |
+| `inference/evaluate_hecktor.py` | **NEW** – DSC evaluation |
+| `data_preparation/prepare_hecktor_npz.py` | **NEW** – NIfTI → NPZ conversion |
+| `sam2/configs/sam2.1_hiera_tiny_hecktor.yaml` | **NEW** – HECKTOR training config |
+| `training/dataset/vos_raw_dataset.py` | Consolidated, removed dead branches |
+| `training/dataset/vos_segment_loader.py` | Consolidated all loaders, added docstrings |
+| `sam2/build_sam.py` | Updated docstrings, type hints |
+| `setup.py` | Updated for HECKTOR project |
+| All files | Uniform docstrings, import cleanup, checkpoint paths updated |
