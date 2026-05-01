@@ -1,27 +1,23 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
+"""
+setup.py
+========
+Installation script for the HECKTOR-MedSAM2 project.
+"""
 
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
 import os
-
 from setuptools import find_packages, setup
 
-# Package metadata
-NAME = "MedSAM2"
-VERSION = "1.0"
-DESCRIPTION = "MedSAM2 was adapted from SAM2 (https://github.com/facebookresearch/sam2) for medical image segmentation."
-URL = "https://github.com/bowang-lab/MedSAM2"
-AUTHOR = "WangLab"
-AUTHOR_EMAIL = "medseg20s@gmail.com"
-LICENSE = "Apache 2.0"
+NAME = "hecktor_medsam2"
+VERSION = "1.0.0"
+DESCRIPTION = (
+    "MedSAM2 fine-tuned for HECKTOR head-and-neck tumour segmentation "
+    "(GTVp + GTVn) from dual-modality CT + PET data."
+)
 
-# Read the contents of README file
 with open("README.md", "r", encoding="utf-8") as f:
     LONG_DESCRIPTION = f.read()
 
-# Required dependencies
-REQUIRED_PACKAGES = [
+REQUIRED = [
     "torch>=2.5.1",
     "torchvision>=0.20.1",
     "numpy>=2.0.1",
@@ -30,69 +26,41 @@ REQUIRED_PACKAGES = [
     "iopath>=0.1.10",
     "pillow>=10.4.0",
     "SimpleITK>=2.4.0",
+    "huggingface-hub>=0.20.0",
+    "tensordict>=0.5.0",
+    "fvcore>=0.1.5.post20221221",
+    "pandas>=2.2.0",
+    "scikit-image>=0.24.0",
+    "tensorboard>=2.17.0",
+    "matplotlib>=3.9.0",
 ]
 
-EXTRA_PACKAGES = {
-    "notebooks": [
-        "matplotlib>=3.9.1",
-        "jupyter>=1.0.0",
-        "opencv-python>=4.10.0",
-        "eva-decord>=0.6.1",
-    ],
-    "interactive-demo": [
-        "Flask>=3.0.3",
-        "Flask-Cors>=5.0.0",
-        "av>=13.0.0",
-        "dataclasses-json>=0.6.7",
-        "eva-decord>=0.6.1",
-        "gunicorn>=23.0.0",
-        "imagesize>=1.4.1",
-        "pycocotools>=2.0.8",
-        "strawberry-graphql>=0.239.2",
+EXTRAS = {
+    "train": [
+        "submitit>=1.5.1",
+        "omegaconf>=2.3.0",
     ],
     "dev": [
-        "matplotlib>=3.9.1",
-        "jupyter>=1.0.0",
-        "black==24.2.0",
-        "usort==1.0.2",
-        "ufmt==2.0.0b2",
-        "fvcore>=0.1.5.post20221221",
-        "pandas>=2.2.3",
-        "scikit-image>=0.24.0",
-        "tensorboard>=2.17.0",
-        "pycocotools>=2.0.8",
-        "tensordict>=0.5.0",
-        "opencv-python>=4.10.0",
-        "submitit>=1.5.1",
+        "pytest>=8.0.0",
+        "black>=24.0.0",
     ],
 }
 
-# By default, we also build the SAM 2 CUDA extension.
-# You may turn off CUDA build with `export SAM2_BUILD_CUDA=0`.
 BUILD_CUDA = os.getenv("SAM2_BUILD_CUDA", "1") == "1"
-# By default, we allow SAM 2 installation to proceed even with build errors.
-# You may force stopping on errors with `export SAM2_BUILD_ALLOW_ERRORS=0`.
 BUILD_ALLOW_ERRORS = os.getenv("SAM2_BUILD_ALLOW_ERRORS", "1") == "1"
 
-# Catch and skip errors during extension building and print a warning message
-# (note that this message only shows up under verbose build mode
-# "pip install -v -e ." or "python setup.py build_ext -v")
 CUDA_ERROR_MSG = (
-    "{}\n\n"
-    "Failed to build the SAM 2 CUDA extension due to the error above. "
-    "You can still use SAM 2 and it's OK to ignore the error above, although some "
-    "post-processing functionality may be limited (which doesn't affect the results in most cases; "
-    "(see https://github.com/facebookresearch/sam2/blob/main/INSTALL.md).\n"
+    "{}\n\nFailed to build the SAM2 CUDA extension. "
+    "You can still use MedSAM2 without it (some post-processing steps will "
+    "be skipped).\n"
 )
 
 
 def get_extensions():
     if not BUILD_CUDA:
         return []
-
     try:
         from torch.utils.cpp_extension import CUDAExtension
-
         srcs = ["sam2/csrc/connected_components.cu"]
         compile_args = {
             "cxx": [],
@@ -103,22 +71,18 @@ def get_extensions():
                 "-D__CUDA_NO_HALF2_OPERATORS__",
             ],
         }
-        ext_modules = [CUDAExtension("sam2._C", srcs, extra_compile_args=compile_args)]
+        return [CUDAExtension("sam2._C", srcs, extra_compile_args=compile_args)]
     except Exception as e:
         if BUILD_ALLOW_ERRORS:
             print(CUDA_ERROR_MSG.format(e))
-            ext_modules = []
-        else:
-            raise e
-
-    return ext_modules
+            return []
+        raise
 
 
 try:
     from torch.utils.cpp_extension import BuildExtension
 
     class BuildExtensionIgnoreErrors(BuildExtension):
-
         def finalize_options(self):
             try:
                 super().finalize_options()
@@ -153,25 +117,20 @@ except Exception as e:
     if BUILD_ALLOW_ERRORS:
         print(CUDA_ERROR_MSG.format(e))
     else:
-        raise e
+        raise
 
-
-# Setup configuration
 setup(
     name=NAME,
     version=VERSION,
     description=DESCRIPTION,
     long_description=LONG_DESCRIPTION,
     long_description_content_type="text/markdown",
-    url=URL,
-    author=AUTHOR,
-    author_email=AUTHOR_EMAIL,
-    license=LICENSE,
-    packages=find_packages(exclude="notebooks"),
+    author="Ethan",
+    python_requires=">=3.10",
+    packages=find_packages(exclude=["notebooks", "scripts"]),
     include_package_data=True,
-    install_requires=REQUIRED_PACKAGES,
-    extras_require=EXTRA_PACKAGES,
-    python_requires=">=3.10.0",
+    install_requires=REQUIRED,
+    extras_require=EXTRAS,
     ext_modules=get_extensions(),
     cmdclass=cmdclass,
 )
