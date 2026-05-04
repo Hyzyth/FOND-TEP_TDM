@@ -9,7 +9,7 @@ volumes.
 ## Project structure
 
 ```
-hecktor_medsam2/
+MedSAM2/
 ├── data_preparation/
 │   ├── __init__.py
 │   └── prepare_hecktor_npz.py    ← convert NIfTI → NPZ
