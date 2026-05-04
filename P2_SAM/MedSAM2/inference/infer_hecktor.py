@@ -4,11 +4,19 @@ infer_hecktor.py
 MedSAM2 inference for HECKTOR Task-1: GTVp (label 1) and GTVn (label 2)
 segmentation from dual-modality CT + PET volumes.
 
+GT label convention (single combined mask):
+    0 – background
+    1 – GTVp  (primary tumour, typically one component)
+    2 – GTVn  (nodal tumour, may be 0, 1 or many components)
+
 The script:
-  1. Loads preprocessed NPZ files (produced by data_preparation/prepare_hecktor_npz.py).
-  2. Runs forward + reverse propagation from the key slice (largest tumour cross-section)
-     using either a bounding-box or point prompt.
-  3. Saves per-patient NPZ segmentation results and optionally NIfTI masks.
+  1. Loads preprocessed NPZ files produced by prepare_hecktor_npz.py.
+  2. Uses slicer.py to find all connected components per label and derives
+     a per-component bounding-box prompt.
+  3. Runs bidirectional propagation (forward + reverse) from the key slice
+     of each component.
+  4. Saves per-patient NPZ segmentation results and optionally NIfTI masks
+     and PNG overlay visualisations.
 
 Usage
 -----
@@ -18,73 +26,72 @@ python inference/infer_hecktor.py \
     --imgs_path /data/ethan/MedSAM2/hecktor_npz/val \
     --pred_save_dir /data/ethan/MedSAM2/predictions/val \
     --save_nifti \
+    --save_overlays \
     --num_workers 1
 """
 
 import argparse
 import os
-import random
+import sys
 import time
 from collections import OrderedDict
 from glob import glob
-from os.path import basename, join
+from os.path import basename, dirname, abspath, join
 
 import matplotlib
-matplotlib.use("Agg")   # headless backend
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import SimpleITK as sitk
 import torch
-import torch.multiprocessing as mp
 from PIL import Image
 from tqdm import tqdm
 
-# Project-level imports – adjust sys.path if running from repo root.
-from sam2.build_sam import build_sam2_video_predictor_npz
+# Ensure repo root is on sys.path when called from a sub-directory
+_REPO_ROOT = dirname(dirname(abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Reproducibility
-# ──────────────────────────────────────────────────────────────────────────────
+from sam2.build_sam import build_sam2_video_predictor_npz
+from slicer import find_components, scale_bbox_2d
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+IMG_MEAN = (0.485, 0.456, 0.406)
+IMG_STD  = (0.229, 0.224, 0.225)
+MODEL_IMG_SIZE = 512
+LABEL_GTVp = 1
+LABEL_GTVn = 2
+
 torch.set_float32_matmul_precision("high")
 torch.manual_seed(2024)
 torch.cuda.manual_seed(2024)
 np.random.seed(2024)
 
-# ImageNet normalisation constants (same as training).
-IMG_MEAN = (0.485, 0.456, 0.406)
-IMG_STD  = (0.229, 0.224, 0.225)
 
-# Target image size used by the MedSAM2 backbone.
-MODEL_IMG_SIZE = 512
-
-# HECKTOR label ids.
-LABEL_GTVp = 1
-LABEL_GTVn = 2
-
-
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Image preprocessing
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 def fuse_ct_pet_to_tensor(
     ct_imgs: np.ndarray,
     pet_imgs: np.ndarray,
     target_size: int = MODEL_IMG_SIZE,
 ) -> torch.Tensor:
-    """Convert (D, H, W) CT and PET uint8 arrays into a normalised (D, 3, S, S) tensor.
+    """Convert (D, H, W) uint8 CT and PET arrays to a (D, 3, S, S) tensor.
 
-    Channel layout: [CT, PET, PET] – mirrors the training fusion strategy.
+    Channel layout mirrors training: [CT, PET, PET].
 
     Parameters
     ----------
-    ct_imgs, pet_imgs : np.ndarray
-        Uint8 arrays of shape (D, H, W) in [0, 255].
-    target_size : int
-        Spatial size to resize each slice to (square).
+    ct_imgs, pet_imgs : (D, H, W) uint8 in [0, 255]
+    target_size : int  square spatial size
 
     Returns
     -------
-    torch.Tensor  shape (D, 3, target_size, target_size) float32
+    torch.Tensor  (D, 3, target_size, target_size) float32, ImageNet-normalised
     """
     D = ct_imgs.shape[0]
     out = np.zeros((D, 3, target_size, target_size), dtype=np.float32)
@@ -96,78 +103,29 @@ def fuse_ct_pet_to_tensor(
         pet_pil = Image.fromarray(pet_imgs[i]).convert("RGB").resize(
             (target_size, target_size)
         )
+        ct_arr  = np.array(ct_pil,  dtype=np.float32) / 255.0
+        pet_arr = np.array(pet_pil, dtype=np.float32) / 255.0
+        out[i, 0] = ct_arr[:, :, 0]   # CT channel
+        out[i, 1] = pet_arr[:, :, 0]  # PET channel
+        out[i, 2] = pet_arr[:, :, 0]  # PET repeated
 
-        ct_arr  = np.array(ct_pil).astype(np.float32) / 255.0    # (H, W, 3)
-        pet_arr = np.array(pet_pil).astype(np.float32) / 255.0   # (H, W, 3)
-
-        # Channel 0 = CT, channels 1-2 = PET.
-        out[i, 0] = ct_arr[:, :, 0]
-        out[i, 1] = pet_arr[:, :, 0]
-        out[i, 2] = pet_arr[:, :, 0]
-
-    tensor = torch.from_numpy(out)           # (D, 3, H, W)
-
-    # Apply ImageNet normalisation.
+    tensor = torch.from_numpy(out)
     mean = torch.tensor(IMG_MEAN, dtype=torch.float32)[:, None, None]
     std  = torch.tensor(IMG_STD,  dtype=torch.float32)[:, None, None]
-    tensor = (tensor - mean) / std
-
-    return tensor
+    return (tensor - mean) / std
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Prompt helpers
-# ──────────────────────────────────────────────────────────────────────────────
-
-def mask2d_to_bbox(mask2d: np.ndarray, shift: int = 0) -> np.ndarray:
-    """Compute axis-aligned bounding box from a 2-D binary mask.
-
-    Parameters
-    ----------
-    mask2d : np.ndarray  (H, W) bool/uint8
-    shift  : int  Additional margin (pixels) added on every side.
-
-    Returns
-    -------
-    np.ndarray  [x_min, y_min, x_max, y_max]
-    """
-    ys, xs = np.where(mask2d > 0)
-    H, W = mask2d.shape
-    x_min = max(0,   int(xs.min()) - shift)
-    x_max = min(W-1, int(xs.max()) + shift)
-    y_min = max(0,   int(ys.min()) - shift)
-    y_max = min(H-1, int(ys.max()) + shift)
-    return np.array([x_min, y_min, x_max, y_max])
-
-
-def find_key_slice(gts_label: np.ndarray) -> int:
-    """Return the axial index with the largest foreground area for *gts_label*.
-
-    Parameters
-    ----------
-    gts_label : np.ndarray  (D, H, W) binary mask for a single label.
-
-    Returns
-    -------
-    int  Slice index (0-based).
-    """
-    areas = gts_label.sum(axis=(1, 2))
-    return int(np.argmax(areas))
-
-
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Visualisation
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 def save_overlay(
     ct_imgs: np.ndarray,
     segs_3d: np.ndarray,
     key_slice: int,
     save_path: str,
-    label_colors: dict = None,
 ) -> None:
-    """Save a 3-panel overlay (25th pct / key slice / 75th pct) as PNG.
-
+    """Save a 3-panel CT overlay (25th pct / key slice / 75th pct) as PNG.
     Parameters
     ----------
     ct_imgs : np.ndarray  (D, H, W) uint8
@@ -176,11 +134,9 @@ def save_overlay(
     save_path : str
     label_colors : dict  {label_id: (r, g, b)} in [0, 1] range
     """
-    if label_colors is None:
-        label_colors = {1: (1.0, 0.2, 0.2), 2: (0.2, 0.6, 1.0)}
-
+    label_colors = {LABEL_GTVp: (1.0, 0.2, 0.2), LABEL_GTVn: (0.2, 0.6, 1.0)}
     D = ct_imgs.shape[0]
-    indices = [D // 4, key_slice, 3 * D // 4]
+    indices = [max(0, D // 4), key_slice, min(D - 1, 3 * D // 4)]
     titles  = ["25th pct", "Key slice", "75th pct"]
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
@@ -202,9 +158,73 @@ def save_overlay(
     plt.close()
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Per-component bidirectional propagation
+# ---------------------------------------------------------------------------
+
+@torch.inference_mode()
+def propagate_one_component(
+    predictor,
+    img_tensor: torch.Tensor,
+    video_h: int,
+    video_w: int,
+    key_z: int,
+    bbox_orig: np.ndarray,
+    orig_hw: tuple,
+    label_id: int,
+    segs_3d: np.ndarray,
+) -> None:
+    """Run forward + reverse propagation for a single lesion component.
+
+    Results are written directly into *segs_3d* (in-place).
+
+    Parameters
+    ----------
+    predictor    : SAM2VideoPredictorNPZ
+    img_tensor   : (D, 3, H_model, W_model) tensor on CUDA
+    video_h, video_w : original slice dimensions
+    key_z        : axial prompt slice index
+    bbox_orig    : [x_min, y_min, x_max, y_max] in original image space
+    orig_hw      : (H, W) of the original slices
+    label_id     : int  (1 = GTVp, 2 = GTVn)
+    segs_3d      : (D, H, W) uint8 array – modified in-place
+    """
+    # Scale bbox from original resolution to model resolution
+    bbox_model = scale_bbox_2d(bbox_orig, orig_hw, MODEL_IMG_SIZE)
+
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        # ── Forward propagation (key_z → last slice) ───────────────────
+        state = predictor.init_state(img_tensor, video_h, video_w)
+        predictor.add_new_points_or_box(
+            inference_state=state,
+            frame_idx=key_z,
+            obj_id=1,
+            box=bbox_model,
+        )
+        for out_frame, _, out_logits in predictor.propagate_in_video(state):
+            mask = (out_logits[0].squeeze(0).cpu().numpy() > 0)
+            segs_3d[out_frame][mask] = label_id
+        predictor.reset_state(state)
+
+        # ── Reverse propagation (key_z → first slice) ──────────────────
+        state = predictor.init_state(img_tensor, video_h, video_w)
+        predictor.add_new_points_or_box(
+            inference_state=state,
+            frame_idx=key_z,
+            obj_id=1,
+            box=bbox_model,
+        )
+        for out_frame, _, out_logits in predictor.propagate_in_video(
+            state, reverse=True
+        ):
+            mask = (out_logits[0].squeeze(0).cpu().numpy() > 0)
+            segs_3d[out_frame][mask] = label_id
+        predictor.reset_state(state)
+
+
+# ---------------------------------------------------------------------------
 # Per-file inference
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 @torch.inference_mode()
 def infer_one_npz(
@@ -214,116 +234,104 @@ def infer_one_npz(
     nifti_dir: str | None,
     overlay_dir: str | None,
     bbox_shift: int = 0,
-    use_gt_prompt: bool = False,
 ) -> tuple[str, float]:
-    """Run MedSAM2 inference on a single NPZ file and save results.
+    """Run MedSAM2 inference on one HECKTOR NPZ file and save results.
 
     Parameters
     ----------
-    npz_path : str
-        Path to the input NPZ file.
-    predictor :
-        Instantiated SAM2VideoPredictorNPZ model.
-    pred_save_dir : str
-        Directory to write the output NPZ.
-    nifti_dir : str or None
-        If not None, also save NIfTI segmentation masks here.
-    overlay_dir : str or None
-        If not None, save PNG overlay visualisations here.
-    bbox_shift : int
-        Extra margin (pixels) added around the bounding-box prompt.
-    use_gt_prompt : bool
-        If True, derive the prompt from ground-truth masks (oracle mode).
+    npz_path      : str   path to input NPZ
+    predictor     : SAM2VideoPredictorNPZ
+    pred_save_dir : str   directory for output NPZ
+    nifti_dir     : str or None  optional NIfTI output directory
+    overlay_dir   : str or None  optional PNG overlay directory
+    bbox_shift    : int   extra margin (pixels) added around bounding-box prompts
 
     Returns
     -------
-    tuple[str, float]
-        (npz basename, inference duration in seconds)
+    (basename, duration_seconds)
     """
     t0 = time.time()
     npz_name = basename(npz_path)
     print(f"\n▶ {npz_name}")
 
-    # ── Load ───────────────────────────────────────────────────────────────
-    data      = np.load(npz_path, allow_pickle=True)
-    ct_imgs   = data["ct_imgs"]    # (D, H, W) uint8
-    pet_imgs  = data["pet_imgs"]   # (D, H, W) uint8
-    gts       = data["gts"]        # (D, H, W) uint8  – used for prompt / eval
-    spacing   = data["spacing"]    # (3,) float64
+    # ── Load ────────────────────────────────────────────────────────────
+    data     = np.load(npz_path, allow_pickle=True)
+    ct_imgs  = data["ct_imgs"]   # (D, H, W) uint8
+    pet_imgs = data["pet_imgs"]  # (D, H, W) uint8
+    gts      = data["gts"]       # (D, H, W) uint8  labels 0/1/2
+    spacing  = data["spacing"]   # (3,) float64
 
     D, H, W = ct_imgs.shape
     segs_3d  = np.zeros((D, H, W), dtype=np.uint8)
 
-    # ── Build model input tensor ───────────────────────────────────────────
+    # ── Build model input tensor ─────────────────────────────────────────
     img_tensor = fuse_ct_pet_to_tensor(ct_imgs, pet_imgs, MODEL_IMG_SIZE).cuda()
+    orig_hw = (H, W)
 
-    # ── Segment each label independently ──────────────────────────────────
-    for label_id in [LABEL_GTVp, LABEL_GTVn]:
-        gt_label = (gts == label_id).astype(np.uint8)
-        if gt_label.sum() == 0:
-            print(f"  Label {label_id}: absent – skipping.")
-            continue
+    # ── Use slicer.py to find per-label connected components + prompts ───
+    # padding converts the component's tight bbox into a slightly looser one
+    components_per_label = find_components(
+        mask        = gts,
+        padding     = bbox_shift,
+        label_values= (LABEL_GTVp, LABEL_GTVn),
+    )
 
-        key_z = find_key_slice(gt_label)
-        print(f"  Label {label_id}: key slice = {key_z}")
+    if not components_per_label:
+        print(f"  [WARN] {npz_name}: no foreground labels found – saving empty mask.")
+    else:
+        for label_id, components in components_per_label.items():
+            label_name = "GTVp" if label_id == LABEL_GTVp else "GTVn"
+            print(f"  {label_name}: {len(components)} component(s)")
 
-        # Derive bounding-box prompt from GT (oracle) or simulate it.
-        bbox = mask2d_to_bbox(gt_label[key_z], shift=bbox_shift)
+            for comp in components:
+                key_z    = comp["z_mid"]
+                bbox_2d  = comp["bbox_2d"]   # [x_min, y_min, x_max, y_max]
+                print(
+                    f"    component {comp['component_id']}: "
+                    f"key_z={key_z}, bbox={bbox_2d.tolist()}, "
+                    f"voxels={comp['voxel_count']}"
+                )
+                propagate_one_component(
+                    predictor = predictor,
+                    img_tensor= img_tensor,
+                    video_h   = H,
+                    video_w   = W,
+                    key_z     = key_z,
+                    bbox_orig = bbox_2d,
+                    orig_hw   = orig_hw,
+                    label_id  = label_id,
+                    segs_3d   = segs_3d,
+                )
 
-        # ── Forward propagation (key → last) ───────────────────────────
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            state = predictor.init_state(img_tensor, H, W)
-            predictor.add_new_points_or_box(
-                inference_state=state,
-                frame_idx=key_z,
-                obj_id=1,
-                box=bbox,
-            )
-            for out_frame, _, out_logits in predictor.propagate_in_video(state):
-                segs_3d[out_frame][out_logits[0].squeeze(0).cpu().numpy() > 0] = label_id
-            predictor.reset_state(state)
-
-        # ── Reverse propagation (key → first) ──────────────────────────
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            state = predictor.init_state(img_tensor, H, W)
-            predictor.add_new_points_or_box(
-                inference_state=state,
-                frame_idx=key_z,
-                obj_id=1,
-                box=bbox,
-            )
-            for out_frame, _, out_logits in predictor.propagate_in_video(
-                state, reverse=True
-            ):
-                segs_3d[out_frame][out_logits[0].squeeze(0).cpu().numpy() > 0] = label_id
-            predictor.reset_state(state)
-
-    # ── Save output NPZ ────────────────────────────────────────────────────
+    # ── Save output NPZ ─────────────────────────────────────────────────
     os.makedirs(pred_save_dir, exist_ok=True)
     np.savez_compressed(
         join(pred_save_dir, npz_name),
-        segs=segs_3d,
-        spacing=spacing,
+        segs    = segs_3d,
+        spacing = spacing,
     )
 
-    # ── Optionally save NIfTI ──────────────────────────────────────────────
+    # ── Optionally save NIfTI ────────────────────────────────────────────
     if nifti_dir is not None:
         os.makedirs(nifti_dir, exist_ok=True)
         sitk_seg = sitk.GetImageFromArray(segs_3d)
+        # spacing stored as (z, y, x); SimpleITK expects (x, y, z)
         sitk_seg.SetSpacing([float(spacing[2]), float(spacing[1]), float(spacing[0])])
         sitk.WriteImage(
             sitk_seg,
             join(nifti_dir, npz_name.replace(".npz", "_seg.nii.gz")),
         )
 
-    # ── Optionally save overlay PNG ────────────────────────────────────────
+    # ── Optionally save overlay PNG ──────────────────────────────────────
     if overlay_dir is not None:
         os.makedirs(overlay_dir, exist_ok=True)
-        key_z_gtvp = find_key_slice((gts == LABEL_GTVp).astype(np.uint8))
+        # Use GTVp key slice for the visualisation anchor
+        gtvp_comps = components_per_label.get(LABEL_GTVp, [])
+        key_z_vis = gtvp_comps[0]["z_mid"] if gtvp_comps else D // 2
         save_overlay(
             ct_imgs,
             segs_3d,
-            key_slice=key_z_gtvp,
+            key_slice=key_z_vis,
             save_path=join(overlay_dir, npz_name.replace(".npz", "_overlay.png")),
         )
 
@@ -332,42 +340,34 @@ def infer_one_npz(
     return npz_name, duration
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Main
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 def main(args: argparse.Namespace) -> None:
-    """Load model, discover NPZ files, run inference, and write timing CSV."""
-
-    # ── Resolve config path to absolute (Hydra requirement) ───────────────
-    cfg_path = os.path.abspath(args.cfg)
-
+    cfg_path  = os.path.abspath(args.cfg)
     predictor = build_sam2_video_predictor_npz(cfg_path, args.checkpoint)
 
-    # ── Discover input files ───────────────────────────────────────────────
     npz_files = sorted(glob(join(args.imgs_path, "**", "*.npz"), recursive=True))
     if not npz_files:
         raise FileNotFoundError(f"No NPZ files found under {args.imgs_path}")
+    print(f"Found {len(npz_files)} file(s) to process.")
 
-    print(f"Found {len(npz_files)} files to process.")
-
-    nifti_dir   = join(args.pred_save_dir, "nifti") if args.save_nifti else None
+    nifti_dir   = join(args.pred_save_dir, "nifti")   if args.save_nifti    else None
     overlay_dir = join(args.pred_save_dir, "overlays") if args.save_overlays else None
 
-    # ── Inference loop ─────────────────────────────────────────────────────
     timing: OrderedDict = OrderedDict()
     for npz_path in tqdm(npz_files, desc="inference"):
         name, dur = infer_one_npz(
-            npz_path=npz_path,
-            predictor=predictor,
-            pred_save_dir=args.pred_save_dir,
-            nifti_dir=nifti_dir,
-            overlay_dir=overlay_dir,
-            bbox_shift=args.bbox_shift,
+            npz_path      = npz_path,
+            predictor     = predictor,
+            pred_save_dir = args.pred_save_dir,
+            nifti_dir     = nifti_dir,
+            overlay_dir   = overlay_dir,
+            bbox_shift    = args.bbox_shift,
         )
         timing[name] = dur
 
-    # ── Write timing CSV ───────────────────────────────────────────────────
     import csv
     csv_path = join(args.pred_save_dir, "inference_timing.csv")
     with open(csv_path, "w", newline="") as f:
@@ -382,52 +382,29 @@ def main(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="MedSAM2 inference for HECKTOR head-and-neck tumour segmentation."
+        description="MedSAM2 HECKTOR inference (GTVp + GTVn, multi-component)."
     )
     parser.add_argument(
-        "--checkpoint",
-        type=str,
+        "--checkpoint", type=str,
         default="/data/ethan/MedSAM2/checkpoints/MedSAM2_latest.pt",
-        help="Path to the MedSAM2 model checkpoint.",
     )
     parser.add_argument(
-        "--cfg",
-        type=str,
+        "--cfg", type=str,
         default="sam2/configs/sam2.1_hiera_t512.yaml",
-        help="Relative or absolute path to the model YAML config.",
     )
     parser.add_argument(
-        "-i", "--imgs_path",
-        type=str,
+        "-i", "--imgs_path", type=str,
         default="/data/ethan/MedSAM2/hecktor_npz/val",
-        help="Directory containing input NPZ files.",
     )
     parser.add_argument(
-        "-o", "--pred_save_dir",
-        type=str,
+        "-o", "--pred_save_dir", type=str,
         default="/data/ethan/MedSAM2/predictions/val",
-        help="Directory where output NPZ files will be written.",
     )
     parser.add_argument(
-        "--bbox_shift",
-        type=int,
-        default=0,
-        help="Extra pixel margin around bounding-box prompt (default: 0).",
+        "--bbox_shift", type=int, default=5,
+        help="Extra voxel margin around bounding-box prompts (default: 5).",
     )
-    parser.add_argument(
-        "--save_nifti",
-        action="store_true",
-        help="Also save segmentation masks as NIfTI files.",
-    )
-    parser.add_argument(
-        "--save_overlays",
-        action="store_true",
-        help="Save PNG overlay visualisations.",
-    )
-    parser.add_argument(
-        "--num_workers",
-        type=int,
-        default=1,
-        help="Number of parallel worker processes (default: 1).",
-    )
+    parser.add_argument("--save_nifti",    action="store_true")
+    parser.add_argument("--save_overlays", action="store_true")
+    parser.add_argument("--num_workers",   type=int, default=1)
     main(parser.parse_args())
