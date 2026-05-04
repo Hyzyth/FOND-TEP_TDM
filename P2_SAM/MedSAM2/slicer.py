@@ -1,102 +1,149 @@
+"""
+slicer.py
+=========
+Utilities for extracting connected components and bounding-box prompts
+from HECKTOR GT masks.
+
+The GT mask is a 3-D array with shape (D, H, W) = (z, y, x) and integer labels:
+    0 – background
+    1 – GTVp (primary tumour)
+    2 – GTVn (nodal tumour; may be absent or multi-focal)
+
+All bounding boxes are returned in (x_min, y_min, x_max, y_max) format
+matching the convention used by SAM2's add_new_points_or_box().
+"""
+
 import numpy as np
 import nibabel as nib
 from scipy.ndimage import label, find_objects
 from nibabel.affines import apply_affine
 
 
-def load_nifti_mask(path):
-    """
-    Load a NIfTI file and return the mask array, affine, and header.
+# ---------------------------------------------------------------------------
+# I/O helpers
+# ---------------------------------------------------------------------------
 
-    Args:
-        path (str): Path to the NIfTI file.
+def load_nifti_mask(path: str):
+    """Load a NIfTI file and return (mask_int16, affine, header).
 
-    Returns:
-        tuple: (mask array as int16, affine matrix, NIfTI header)
+    The mask array is returned in (z, y, x) / (D, H, W) order, which is
+    what SimpleITK / numpy give after GetArrayFromImage.
+
+    Parameters
+    ----------
+    path : str
+
+    Returns
+    -------
+    mask   : np.ndarray  int16, shape (D, H, W)
+    affine : np.ndarray  (4, 4)
+    header : nibabel header object
     """
     img = nib.load(path)
-    mask = img.get_fdata(dtype=np.int16)
+    # nibabel returns (x, y, z); transpose to (z, y, x) for consistency
+    # with the rest of the pipeline that uses (D, H, W) = (z, y, x).
+    mask = np.asarray(img.get_fdata(), dtype=np.int16).transpose(2, 1, 0)
     return mask, img.affine, img.header
 
 
-def voxel_to_world(affine, z, y, x):
-    """
-    Convert voxel coordinates (z, y, x) to world coordinates using the affine matrix.
+def voxel_to_world(affine: np.ndarray, z: int, y: int, x: int) -> np.ndarray:
+    """Convert (z, y, x) voxel coordinates to world coordinates.
 
-    Args:
-        affine (ndarray): Affine transformation matrix.
-        z, y, x (int): Voxel coordinates in (z, y, x) order.
+    Parameters
+    ----------
+    affine : (4, 4) affine matrix
+    z, y, x : int
 
-    Returns:
-        ndarray: World coordinates.
+    Returns
+    -------
+    np.ndarray  world coordinates (3,)
     """
-    # Convert (z, y, x) to (x, y, z) for affine application
+    # nibabel affine expects (x, y, z)
     return apply_affine(affine, (x, y, z))
 
 
-def find_all_components_for_label(mask, label_value, padding=0, affine=None):
-    """
-    Find and return all connected components for a specific label.
+# ---------------------------------------------------------------------------
+# Per-label connected-component extraction
+# ---------------------------------------------------------------------------
 
-    Args:
-        mask (ndarray): 3D label mask.
-        label_value (int): Label value to search for.
-        padding (int, optional): Number of voxels to pad the bounding box.
-        affine (ndarray, optional): Affine matrix for world coordinate conversion.
+def find_all_components_for_label(
+    mask: np.ndarray,
+    label_value: int,
+    padding: int = 0,
+    affine: np.ndarray = None,
+):
+    """Find every connected component for a single label value.
 
-    Returns:
-        list of dict: List of component info dictionaries, or empty list if not found.
+    Parameters
+    ----------
+    mask        : (D, H, W) int array
+    label_value : int  – label to search (1 = GTVp, 2 = GTVn)
+    padding     : int  – voxel padding added to the bounding box on each side
+    affine      : (4,4) array or None  – when given, world-space bbox is added
+
+    Returns
+    -------
+    list of dict, sorted by voxel_count descending.  Each dict contains:
+        label         : int
+        component_id  : int  (1-based)
+        voxel_count   : int
+        z_mid         : int  – axial slice with the largest cross-section
+        bbox_voxel    : dict  {z:(z0,z1), y:(y0,y1), x:(x0,x1)}
+        bbox_2d       : dict  {z_mid: np.ndarray [x_min,y_min,x_max,y_max]}
+        cropped_mask  : np.ndarray  binary, shape of the padded bbox
+        bbox_world    : dict  (only if affine is not None)
     """
     # Create a binary mask for the selected label value
     mask_label = (mask == label_value)
     if not np.any(mask_label):
         return []
 
-    # Label connected components in the binary mask
-    labeled, num_components = label(mask_label)
+    labeled_arr, num_components = label(mask_label)
 
     results = []
+    for comp_id in range(1, num_components + 1):
+        comp_mask = (labeled_arr == comp_id)
 
-    # Process each connected component
-    for component_id in range(1, num_components + 1):
-        component_mask = (labeled == component_id)
-
-        # Find z-range of the component
-        # np.where returns indices in (z, y, x) order for a 3D array
-        # Here, we only extract z indices for min/max z; for completeness, y and x can also be extracted if needed.
-        z_indices, y_indices, x_indices = np.where(component_mask)
-        min_z, max_z = int(np.min(z_indices)), int(np.max(z_indices))
-
-        # Compute the bounding box for the component
-        slices_list = find_objects(component_mask)
-        if not slices_list or slices_list[0] is None or len(slices_list[0]) != 3:
+        z_indices, y_indices, x_indices = np.where(comp_mask)
+        if len(z_indices) == 0:
             continue
 
-        # The slices returned by find_objects correspond to (z, y, x) axes, matching mask.shape order (depth, height, width)
-        assert len(mask.shape) == 3, f"Mask must be a 3D array with axis order (z, y, x), but got shape {mask.shape}"
-        z_slice, y_slice, x_slice = slices_list[0]
-        z0 = max(0, z_slice.start - padding)
-        z1 = min(mask.shape[0], z_slice.stop + padding)
-        y0 = max(0, y_slice.start - padding)
-        y1 = min(mask.shape[1], y_slice.stop + padding)
-        x0 = max(0, x_slice.start - padding)
-        x1 = min(mask.shape[2], x_slice.stop + padding)
+        # Bounding box (with padding, clamped to array bounds)
+        D, H, W = mask.shape
+        z0 = max(0, int(z_indices.min()) - padding)
+        z1 = min(D, int(z_indices.max()) + 1 + padding)
+        y0 = max(0, int(y_indices.min()) - padding)
+        y1 = min(H, int(y_indices.max()) + 1 + padding)
+        x0 = max(0, int(x_indices.min()) - padding)
+        x1 = min(W, int(x_indices.max()) + 1 + padding)
 
-        cropped_mask = component_mask[z0:z1, y0:y1, x0:x1]
-        voxel_count = np.sum(component_mask)
+        cropped_mask = comp_mask[z0:z1, y0:y1, x0:x1]
+        voxel_count  = int(np.sum(comp_mask))
+
+        # Key slice: axial index with the largest 2-D cross-section
+        areas = np.array([
+            comp_mask[z].sum() for z in range(z0, z1)
+        ])
+        z_mid = z0 + int(np.argmax(areas))
+
+        # 2-D bounding box on the key slice (SAM2 format: x_min,y_min,x_max,y_max)
+        ys_mid, xs_mid = np.where(comp_mask[z_mid])
+        bbox_2d = np.array([
+            int(xs_mid.min()), int(ys_mid.min()),
+            int(xs_mid.max()), int(ys_mid.max()),
+        ], dtype=np.int32)
 
         result = {
-            "label": int(label_value),
-            "component_id": int(component_id),
-            "voxel_count": int(voxel_count),
-            "min_z": min_z,
-            "max_z": max_z,
-            "bbox_voxel": {"z": (z0, z1), "y": (y0, y1), "x": (x0, x1)},
+            "label":        int(label_value),
+            "component_id": int(comp_id),
+            "voxel_count":  voxel_count,
+            "z_mid":        z_mid,
+            "bbox_voxel":   {"z": (z0, z1), "y": (y0, y1), "x": (x0, x1)},
+            "bbox_2d":      bbox_2d,   # [x_min, y_min, x_max, y_max] on z_mid
             "cropped_mask": cropped_mask,
         }
 
         if affine is not None:
-            # Convert voxel bounding box corners to world coordinates
             result["bbox_world"] = {
                 "min_corner": tuple(voxel_to_world(affine, z0, y0, x0)),
                 "max_corner": tuple(voxel_to_world(affine, z1 - 1, y1 - 1, x1 - 1)),
@@ -104,30 +151,65 @@ def find_all_components_for_label(mask, label_value, padding=0, affine=None):
 
         results.append(result)
 
-    # Sort by voxel count (largest first)
-    results.sort(key=lambda x: x["voxel_count"], reverse=True)
+    results.sort(key=lambda r: r["voxel_count"], reverse=True)
     return results
 
 
-def find_components(mask, padding=0, affine=None, label_values=(1, 2)):
-    """
-    Find all connected components for each label value in label_values.
+def find_components(
+    mask: np.ndarray,
+    padding: int = 0,
+    affine: np.ndarray = None,
+    label_values=(1, 2),
+) -> dict:
+    """Find all connected components for each label in *label_values*.
 
-    Args:
-        mask (ndarray): 3D label mask.
-        padding (int, optional): Padding for the bounding box.
-        affine (ndarray, optional): Affine matrix for world coordinate conversion.
-        label_values (iterable of int, optional): Label values to process.
-            Default is (1, 2) for GTVt and GTVn.
+    Parameters
+    ----------
+    mask         : (D, H, W) int array  (0=bg, 1=GTVp, 2=GTVn)
+    padding      : int  voxel padding for bounding boxes
+    affine       : (4,4) or None
+    label_values : iterable[int]  labels to process
 
-    Returns:
-        dict: Mapping of label values to lists of component info dictionaries.
+    Returns
+    -------
+    dict mapping label_id → list of component dicts (sorted largest-first).
+    Only labels actually present in the mask are included.
     """
-    results = {}
-    # Only process label values that are present in the mask to avoid unnecessary computation
-    present_labels = set(np.unique(mask)).intersection(label_values)
-    for label_value in present_labels:
-        components = find_all_components_for_label(mask, label_value, padding=padding, affine=affine)
-        if components:
-            results[label_value] = components
-    return results
+    present = set(np.unique(mask).tolist()).intersection(set(label_values))
+    return {
+        lv: find_all_components_for_label(mask, lv, padding=padding, affine=affine)
+        for lv in present
+        if find_all_components_for_label(mask, lv, padding=padding, affine=affine)
+    }
+
+
+# ---------------------------------------------------------------------------
+# Convenience: scale a 2-D bbox from original image space to model space
+# ---------------------------------------------------------------------------
+
+def scale_bbox_2d(
+    bbox: np.ndarray,
+    orig_hw: tuple,
+    model_size: int = 512,
+) -> np.ndarray:
+    """Scale [x_min,y_min,x_max,y_max] from orig_hw to model_size×model_size.
+
+    Parameters
+    ----------
+    bbox       : (4,) int array  [x_min, y_min, x_max, y_max]
+    orig_hw    : (H, W)  original slice dimensions
+    model_size : int  target square size (default 512)
+
+    Returns
+    -------
+    np.ndarray  (4,) float32
+    """
+    H, W = orig_hw
+    sx = model_size / W
+    sy = model_size / H
+    return np.array([
+        bbox[0] * sx,
+        bbox[1] * sy,
+        bbox[2] * sx,
+        bbox[3] * sy,
+    ], dtype=np.float32)

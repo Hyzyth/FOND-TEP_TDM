@@ -2,17 +2,21 @@
 #
 # sam2.1_hiera_tiny_hecktor.yaml
 # ================================
-# MedSAM2 fine-tuning configuration for HECKTOR Task-1 (GTVp + GTVn segmentation).
+# MedSAM2 fine-tuning configuration for HECKTOR Task-1
+# (GTVp + GTVn segmentation from dual-modality CT + PET).
 #
-# Input modality : CT + PET  (fused as 3-channel [CT, PET, PET])
-# Labels         : 0 = background  |  1 = GTVp  |  2 = GTVn
+# GT label convention (single combined mask file):
+#   0 = background
+#   1 = GTVp  (primary tumour)
+#   2 = GTVn  (nodal tumour; may be absent)
+#
 # Backbone       : SAM2.1-Hiera-Tiny (512-px variant)
 # Initialisation : MedSAM2_latest.pt
 #
 # Paths to update
 # ---------------
-#   trainer.data.train.datasets[0].dataset.video_dataset.folder
-#     → your NPZ train directory
+#   dataset.train_folder / dataset.val_folder
+#     → directories containing train/val NPZ files
 #   trainer.checkpoint.model_weight_initializer.state_dict.checkpoint_path
 #     → /data/ethan/MedSAM2/checkpoints/MedSAM2_latest.pt
 #   launcher.experiment_log_dir
@@ -190,7 +194,6 @@ trainer:
     use_mlp_for_obj_ptr_proj: true
 
     # ── Training-specific parameters ────────────────────────────────────
-    # Use box prompts during training (good for tumour segmentation).
     prob_to_use_pt_input_for_train: 0.5
     prob_to_use_pt_input_for_eval: 0.0
     prob_to_use_box_input_for_train: 1.0
@@ -219,9 +222,8 @@ trainer:
           dataset:
             _target_: training.dataset.utils.ConcatDataset
             datasets:
-              # HECKTOR PET+CT dual-modality dataset.
-              # NPZ files are produced by data_preparation/prepare_hecktor_npz.py.
-              # Each file contains: ct_imgs, pet_imgs, gts, spacing.
+              # HECKTOR NPZ dataset (GT: single file, labels 0=bg / 1=GTVp / 2=GTVn)
+              # Produced by: python data_preparation/prepare_hecktor_npz.py
               - _target_: training.dataset.vos_dataset.VOSDataset
                 transforms: ${vos.train_transforms}
                 training: true
@@ -321,7 +323,7 @@ trainer:
   # ── Checkpointing ─────────────────────────────────────────────────────────
   checkpoint:
     save_dir: ${launcher.experiment_log_dir}/checkpoints
-    save_freq: 10  # Save every 10 epochs; 0 = only keep the last checkpoint.
+    save_freq: 10
     model_weight_initializer:
       _partial_: True
       _target_: training.utils.checkpoint_utils.load_state_dict_into_model
@@ -330,7 +332,6 @@ trainer:
       ignore_missing_keys: null
       state_dict:
         _target_: training.utils.checkpoint_utils.load_checkpoint_and_apply_kernels
-        # Initialise from the general MedSAM2 checkpoint (recommended).
         checkpoint_path: /data/ethan/MedSAM2/checkpoints/MedSAM2_latest.pt
         ckpt_state_dict_keys: ['model']
 
