@@ -87,12 +87,7 @@ def main(args: argparse.Namespace) -> None:
         # Prediction NPZ contains key "segs"
         segs = pred_data["segs"]
 
-        # GT NPZ contains key "gts" (produced by prepare_hecktor_npz.py)
-        if "gts" in gt_data:
-            gts = gt_data["gts"]
-        else:
-            # Fallback: some older exports may use "segs"
-            gts = gt_data["segs"]
+        gts  = gt_data["gts"] if "gts" in gt_data else gt_data["segs"]
 
         if segs.shape != gts.shape:
             print(
@@ -109,35 +104,42 @@ def main(args: argparse.Namespace) -> None:
         if not np.isnan(dsc_n):
             dsc_gtvn_all.append(dsc_n)
 
+        # Per-patient overall = mean of whichever labels are present
+        present = [v for v in [dsc_p, dsc_n] if not np.isnan(v)]
+        overall = float(np.mean(present)) if present else float("nan")
+
         rows.append({
-            "patient":  name.replace(".npz", ""),
-            "dsc_gtvp": f"{dsc_p:.4f}" if not np.isnan(dsc_p) else "N/A",
-            "dsc_gtvn": f"{dsc_n:.4f}" if not np.isnan(dsc_n) else "N/A",
+            "patient":     name.replace(".npz", ""),
+            "dsc_gtvp":    f"{dsc_p:.4f}"  if not np.isnan(dsc_p) else "N/A",
+            "dsc_gtvn":    f"{dsc_n:.4f}"  if not np.isnan(dsc_n) else "N/A",
+            "dsc_overall": f"{overall:.4f}" if not np.isnan(overall) else "N/A",
         })
 
     # ── Aggregate ────────────────────────────────────────────────────────
     mean_p       = float(np.mean(dsc_gtvp_all)) if dsc_gtvp_all else float("nan")
     mean_n       = float(np.mean(dsc_gtvn_all)) if dsc_gtvn_all else float("nan")
     valid_means  = [x for x in [mean_p, mean_n] if not np.isnan(x)]
-    mean_overall = float(np.mean(valid_means)) if valid_means else float("nan")
+    mean_overall = float(np.mean(valid_means))  if valid_means  else float("nan")
 
     rows.append({
-        "patient":  "MEAN",
-        "dsc_gtvp": f"{mean_p:.4f}",
-        "dsc_gtvn": f"{mean_n:.4f}",
+        "patient":     "MEAN",
+        "dsc_gtvp":    f"{mean_p:.4f}",
+        "dsc_gtvn":    f"{mean_n:.4f}",
+        "dsc_overall": f"{mean_overall:.4f}",
     })
 
     # ── Write CSV ────────────────────────────────────────────────────────
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+    fieldnames = ["patient", "dsc_gtvp", "dsc_gtvn", "dsc_overall"]
     with open(args.output, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["patient", "dsc_gtvp", "dsc_gtvn"])
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
     print(f"\n{'='*44}")
-    print(f"  DSC GTVp  : {mean_p:.4f}  (n={len(dsc_gtvp_all)})")
-    print(f"  DSC GTVn  : {mean_n:.4f}  (n={len(dsc_gtvn_all)})")
-    print(f"  DSC mean  : {mean_overall:.4f}")
+    print(f"  DSC GTVp    : {mean_p:.4f}  (n={len(dsc_gtvp_all)})")
+    print(f"  DSC GTVn    : {mean_n:.4f}  (n={len(dsc_gtvn_all)})")
+    print(f"  DSC overall : {mean_overall:.4f}")
     print(f"{'='*44}")
     print(f"Results saved → {args.output}")
 
