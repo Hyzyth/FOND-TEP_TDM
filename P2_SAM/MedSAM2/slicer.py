@@ -175,12 +175,16 @@ def find_components(
     dict mapping label_id → list of component dicts (sorted largest-first).
     Only labels actually present in the mask are included.
     """
+    # FIX: compute components once per label, not twice (was calling
+    # find_all_components_for_label in both the dict comprehension value
+    # and the `if` filter, doubling work on every label).
     present = set(np.unique(mask).tolist()).intersection(set(label_values))
-    return {
-        lv: find_all_components_for_label(mask, lv, padding=padding, affine=affine)
-        for lv in present
-        if find_all_components_for_label(mask, lv, padding=padding, affine=affine)
-    }
+    result = {}
+    for lv in present:
+        comps = find_all_components_for_label(mask, lv, padding=padding, affine=affine)
+        if comps:
+            result[lv] = comps
+    return result
 
 
 # ---------------------------------------------------------------------------
