@@ -176,7 +176,11 @@ def propagate_one_component(
 ) -> None:
     """Run forward + reverse propagation for a single lesion component.
 
-    Results are written directly into *segs_3d* (in-place).
+    Results are written into *segs_3d* in-place.  To avoid overwriting
+    voxels already assigned to a different label (e.g. GTVp overwritten by
+    GTVn), the write is guarded: a predicted voxel is only assigned
+    *label_id* when it is currently background (0).  GTVp is processed
+    first (label 1 < label 2), so GTVn can never clobber GTVp predictions.
 
     Parameters
     ----------
@@ -192,6 +196,14 @@ def propagate_one_component(
     # Scale bbox from original resolution to model resolution
     bbox_model = scale_bbox_2d(bbox_orig, orig_hw, MODEL_IMG_SIZE)
 
+    def _write(frame_idx: int, logits: torch.Tensor) -> None:
+        """Write predicted mask into segs_3d, never overwriting existing labels."""
+        pred_mask = logits[0].squeeze(0).cpu().numpy() > 0   # (H, W) bool
+        # Only fill voxels that are still background to avoid race conditions
+        # when multiple labels share overlapping propagation paths.
+        writeable = pred_mask & (segs_3d[frame_idx] == 0)
+        segs_3d[frame_idx][writeable] = label_id
+
     with torch.autocast("cuda", dtype=torch.bfloat16):
         # ── Forward propagation (key_z → last slice) ───────────────────
         state = predictor.init_state(img_tensor, video_h, video_w)
@@ -202,8 +214,7 @@ def propagate_one_component(
             box=bbox_model,
         )
         for out_frame, _, out_logits in predictor.propagate_in_video(state):
-            mask = (out_logits[0].squeeze(0).cpu().numpy() > 0)
-            segs_3d[out_frame][mask] = label_id
+            _write(out_frame, out_logits)
         predictor.reset_state(state)
 
         # ── Reverse propagation (key_z → first slice) ──────────────────
@@ -217,8 +228,7 @@ def propagate_one_component(
         for out_frame, _, out_logits in predictor.propagate_in_video(
             state, reverse=True
         ):
-            mask = (out_logits[0].squeeze(0).cpu().numpy() > 0)
-            segs_3d[out_frame][mask] = label_id
+            _write(out_frame, out_logits)
         predictor.reset_state(state)
 
 
@@ -269,7 +279,9 @@ def infer_one_npz(
     orig_hw = (H, W)
 
     # ── Use slicer.py to find per-label connected components + prompts ───
-    # padding converts the component's tight bbox into a slightly looser one
+    # Process labels in ascending order so GTVp (1) is written before
+    # GTVn (2); the guarded write in propagate_one_component then ensures
+    # GTVn can never overwrite GTVp voxels.
     components_per_label = find_components(
         mask        = gts,
         padding     = bbox_shift,
@@ -279,7 +291,8 @@ def infer_one_npz(
     if not components_per_label:
         print(f"  [WARN] {npz_name}: no foreground labels found – saving empty mask.")
     else:
-        for label_id, components in components_per_label.items():
+        for label_id in sorted(components_per_label):          # 1 before 2
+            components = components_per_label[label_id]
             label_name = "GTVp" if label_id == LABEL_GTVp else "GTVn"
             print(f"  {label_name}: {len(components)} component(s)")
 
@@ -353,7 +366,7 @@ def main(args: argparse.Namespace) -> None:
         raise FileNotFoundError(f"No NPZ files found under {args.imgs_path}")
     print(f"Found {len(npz_files)} file(s) to process.")
 
-    nifti_dir   = join(args.pred_save_dir, "nifti")   if args.save_nifti    else None
+    nifti_dir   = join(args.pred_save_dir, "nifti")    if args.save_nifti    else None
     overlay_dir = join(args.pred_save_dir, "overlays") if args.save_overlays else None
 
     timing: OrderedDict = OrderedDict()
