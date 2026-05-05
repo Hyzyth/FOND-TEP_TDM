@@ -1,4 +1,11 @@
 # @package _global_
+# sam2.1_hiera_tiny_finetune512.yaml
+# ====================================
+# Generic fine-tuning configuration for SAM2.1-Hiera-Tiny at 512-px.
+# For HECKTOR-specific training use sam2.1_hiera_tiny_hecktor.yaml instead.
+#
+# FIX: replaced NPZRawDataset (expects key "imgs") with HECKTORNPZRawDataset
+# (expects "ct_imgs" / "pet_imgs" / "gts"), which is required for CT+PET data.
 
 scratch:
   resolution: 512
@@ -13,7 +20,7 @@ scratch:
 
 dataset:
   # PATHS to Dataset
-  folder:  # PATH to Med NPZ folder
+  folder:  # PATH to HECKTOR NPZ folder (train split)
   multiplier: 1
 
 # Video transforms
@@ -194,9 +201,6 @@ trainer:
     rand_init_cond_frames_for_train: True  # random 1~2
     num_correction_pt_per_frame: 7
     use_act_ckpt_iterative_pt_sampling: false
-    
-
-    
     num_init_cond_frames_for_eval: 1  # only mask on the first frame
     forward_backbone_per_frame_for_eval: True
     
@@ -213,19 +217,20 @@ trainer:
             _target_: training.dataset.utils.ConcatDataset
             datasets:
             # HECKTOR PET+CT NPZ dataset
-            # Preprocess: fuse PET+CT into a single 3-channel volume (e.g., CT/PET/PET)
-            # or handle as separate channels before saving to NPZ
+            # FIX: was NPZRawDataset (expects key "imgs") – replaced with
+            # HECKTORNPZRawDataset which reads "ct_imgs"/"pet_imgs"/"gts"
+            # and fuses them into the [CT, PET, PET] 3-channel layout.
             - _target_: training.dataset.vos_dataset.VOSDataset
-              transforms: ${vos.train_transforms}
-              training: true
-              video_dataset:
-                _target_: training.dataset.vos_raw_dataset.NPZRawDataset
-                folder: /path/to/hecktor/npz_train  # <-- update this
-              sampler:
-                _target_: training.dataset.vos_sampler.RandomUniformSampler
-                num_frames: ${scratch.num_frames}
-                max_num_objects: ${scratch.max_num_objects}
-              multiplier: 1
+                transforms: ${vos.train_transforms}
+                training: true
+                video_dataset:
+                  _target_: training.dataset.hecktor_dataset.HECKTORNPZRawDataset
+                  folder: ${dataset.folder}
+                sampler:
+                  _target_: training.dataset.vos_sampler.RandomUniformSampler
+                  num_frames: ${scratch.num_frames}
+                  max_num_objects: ${scratch.max_num_objects}
+                multiplier: ${dataset.multiplier}
       shuffle: True
       num_workers: ${scratch.num_train_workers}
       pin_memory: True
