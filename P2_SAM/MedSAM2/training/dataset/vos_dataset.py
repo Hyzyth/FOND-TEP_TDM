@@ -4,9 +4,9 @@ training/dataset/vos_dataset.py
 PyTorch Dataset wrapping a :class:`VOSRawDataset` + :class:`VOSSampler`
 pair with optional augmentation transforms.
 
-Also handles the HECKTOR dual-modality case transparently: if frame data
-is already a pre-loaded tensor (``frame.data is not None``) the PIL-image
-loading path is skipped.
+For HECKTOR NPZ frames, where frame.data is already a (3, H, W) float tensor,
+the PIL round-trip is bypassed entirely: the tensor is used directly, avoiding
+the lossy uint8 quantisation that would occur via _tensor_to_pil → ToTensorAPI.
 """
 
 import logging
@@ -96,15 +96,21 @@ class VOSDataset(VisionDataset):
 
     def _construct(self, video, sampled, segment_loader) -> VideoDatapoint:
         """Build a :class:`VideoDatapoint` from sampled frames and objects."""
-        sampled_frames = sampled.frames
+        sampled_frames     = sampled.frames
         sampled_object_ids = sampled.object_ids
 
         rgb_images = _load_images(sampled_frames)
         images: List[Frame] = []
 
         for frame_idx, frame in enumerate(sampled_frames):
-            w, h = rgb_images[frame_idx].size
-            images.append(Frame(data=rgb_images[frame_idx], objects=[]))
+            img = rgb_images[frame_idx]
+            # PIL images have a .size attribute; tensors do not.
+            if isinstance(img, PILImage.Image):
+                w, h = img.size
+            else:
+                # Pre-loaded float tensor (C, H, W)
+                h, w = img.shape[1], img.shape[2]
+            images.append(Frame(data=img, objects=[]))
 
             if isinstance(segment_loader, JSONSegmentLoader):
                 segments = segment_loader.load(
@@ -143,13 +149,21 @@ class VOSDataset(VisionDataset):
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _load_images(frames) -> List[PILImage.Image]:
-    """Load RGB PIL images for a list of frames, with disk-cache dedup."""
+    """Load images for a list of frames.
+
+    - If ``frame.data`` is a pre-loaded tensor (HECKTOR NPZ path), return it
+      directly — no PIL conversion, no uint8 quantisation.
+    - Otherwise open the image from disk as an RGB PIL image.
+    """
     images = []
     cache: dict = {}
     for frame in frames:
         if frame.data is not None:
-            # Pre-loaded tensor (e.g. HECKTOR NPZ).
-            images.append(_tensor_to_pil(frame.data))
+            # Pre-loaded (3, H, W) float tensor.
+            # Transforms that require PIL (e.g. ColorJitter) will receive
+            # this tensor; those transforms must handle both PIL and tensor
+            # inputs, which the torchvision functional API supports.
+            images.append(frame.data)
         else:
             path = frame.image_path
             if path in cache:
@@ -161,7 +175,7 @@ def _load_images(frames) -> List[PILImage.Image]:
     return images
 
 
-def _tensor_to_pil(data: torch.Tensor) -> PILImage.Image:
+def _tensor_to_pil(data: torch.Tensor) -> PILImage.Image:   #Retained for any callers outside the main training loop that may still need a PIL representation. Not used internally by _load_images anymore.
     """Convert a (3, H, W) float [0,1] tensor to a uint8 PIL RGB image."""
     arr = (data.cpu().numpy().transpose(1, 2, 0) * 255.0).astype(np.uint8)
     return PILImage.fromarray(arr)
