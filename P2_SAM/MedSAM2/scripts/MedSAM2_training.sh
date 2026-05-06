@@ -57,7 +57,7 @@ echo "========================================"
 # Use this before committing to a full run to verify the pipeline is intact.
 # =============================================================================
 
-# CUDA_VISIBLE_DEVICES=0 python3.12 -u training/train.py \
+# CUDA_VISIBLE_DEVICES=0 python3.10 -u training/train.py \
 #     --config  sam2.1_hiera_tiny_hecktor \
 #     dataset.train_folder="$NPZ_DIR/train" \
 #     dataset.val_folder="$NPZ_DIR/val" \
@@ -80,7 +80,7 @@ echo "========================================"
 
 CUDA_VISIBLE_DEVICES=0 \
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-python3.12 -u training/train.py \
+python3.10 -u training/train.py \
     --config  sam2.1_hiera_tiny_hecktor \
     dataset.train_folder="$NPZ_DIR/train" \
     dataset.val_folder="$NPZ_DIR/val" \
@@ -95,7 +95,7 @@ python3.12 -u training/train.py \
 
 # CUDA_VISIBLE_DEVICES=0 \
 # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-# python3.12 -u training/train.py \
+# python3.10 -u training/train.py \
 #     --config  sam2.1_hiera_tiny_hecktor \
 #     dataset.train_folder="$NPZ_DIR/train" \
 #     dataset.val_folder="$NPZ_DIR/val" \

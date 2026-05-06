@@ -29,10 +29,10 @@ if ! command -v uv &> /dev/null; then
     source "$HOME/.local/bin/env"
 fi
 
-uv python install 3.12
+uv python install 3.10
 
 if [ ! -d "medsam2_env" ]; then
-    uv venv medsam2_env --python 3.12
+    uv venv medsam2_env --python 3.10
 fi
 
 source medsam2_env/bin/activate
@@ -78,7 +78,7 @@ echo "========================================"
 #   --pet_suv_max 10.0
 # =============================================================================
 
-python3.12 data_preparation/prepare_hecktor_npz.py \
+python3.10 data_preparation/prepare_hecktor_npz.py \
     --data_dir   "$DATA_DIR" \
     --output_dir "$OUTPUT_DIR" \
     --val_ratio  0.2 \

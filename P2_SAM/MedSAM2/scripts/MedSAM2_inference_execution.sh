@@ -60,7 +60,7 @@ echo "========================================"
 # --save_overlays : write axial PNG overlays (CT + GTVp/GTVn colour overlay)
 # =============================================================================
 
-CUDA_VISIBLE_DEVICES=0 python3.12 inference/infer_hecktor.py \
+CUDA_VISIBLE_DEVICES=0 python3.10 inference/infer_hecktor.py \
     --checkpoint    "$CHECKPOINT" \
     --cfg           "$CFG" \
     --imgs_path     "$NPZ_VAL" \
@@ -74,7 +74,7 @@ CUDA_VISIBLE_DEVICES=0 python3.12 inference/infer_hecktor.py \
 # STEP 2B — Inference on training set (overfit check)  [UNCOMMENT IF NEEDED]
 # =============================================================================
 
-# CUDA_VISIBLE_DEVICES=0 python3.12 inference/infer_hecktor.py \
+# CUDA_VISIBLE_DEVICES=0 python3.10 inference/infer_hecktor.py \
 #     --checkpoint    "$CHECKPOINT" \
 #     --cfg           "$CFG" \
 #     --imgs_path     "$NPZ_TRAIN" \
@@ -89,7 +89,7 @@ CUDA_VISIBLE_DEVICES=0 python3.12 inference/infer_hecktor.py \
 #           [UNCOMMENT FOR FINAL RESULTS]
 # =============================================================================
 
-# CUDA_VISIBLE_DEVICES=0 python3.12 inference/infer_hecktor.py \
+# CUDA_VISIBLE_DEVICES=0 python3.10 inference/infer_hecktor.py \
 #     --checkpoint    "$CHECKPOINT" \
 #     --cfg           "$CFG" \
 #     --imgs_path     "$NPZ_VAL" \
@@ -111,14 +111,14 @@ echo "========================================"
 echo "  MedSAM2 × HECKTOR — Evaluation"
 echo "========================================"
 
-python3.12 inference/evaluate_hecktor.py \
+python3.10 inference/evaluate_hecktor.py \
     --pred_dir "$PRED_ROOT/val_best" \
     --gt_dir   "$NPZ_VAL" \
     --output   "$PRED_ROOT/val_best/dsc_results.csv" \
     2>&1 | tee "$PRED_ROOT/evaluation_val_best.log"
 
 # Uncomment to also evaluate the train-set run (overfit check):
-# python3.12 inference/evaluate_hecktor.py \
+# python3.10 inference/evaluate_hecktor.py \
 #     --pred_dir "$PRED_ROOT/train_best" \
 #     --gt_dir   "$NPZ_TRAIN" \
 #     --output   "$PRED_ROOT/train_best/dsc_results.csv" \
