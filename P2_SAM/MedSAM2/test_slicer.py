@@ -5,11 +5,12 @@ Visual smoke-test for slicer.py.
 
 For each of the k sampled patients in the val (or train) NPZ directory:
   - Runs find_components() on the GT mask
-  - For every detected component, renders THREE slices (min_z, mid_z, max_z) with:
+  - For every detected component, dynamically determines the optimal viewing axis (Z, Y, or X)
+  - Renders THREE slices (tight min, mid, tight max) along that axis with:
     - CT background, PET background, or both
     - GT mask overlay (semi-transparent)
-    - Predicted 3D bounding box footprint (XY)
-    - Component metadata in the title (label, id, voxel count, z_index)
+    - Predicted 2D bounding box including planar padding
+    - Component metadata in the title
   - Saves one PNG summary figure per patient under --output_dir
 
 Usage
@@ -19,7 +20,9 @@ python test_slicer.py \
     --output_dir /data/ethan/MedSAM2/slicer_test \
     --k 5 \
     --seed 42 \
-    --modality both
+    --modality both \
+    --slice_pad 1 \
+    --planar_pad 5
 """
 
 import argparse
@@ -48,6 +51,8 @@ LABEL_STYLE = {
 }
 LINE_STYLES = ["solid", "dashed", "dotted", "dashdot"]
 
+AXIS_NAMES = {0: "Z (Axial)", 1: "Y (Coronal)", 2: "X (Sagittal)"}
+AXIS_LABELS = {0: "z", 1: "y", 2: "x"}
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -62,7 +67,6 @@ def load_npz(npz_path: Path) -> dict:
         "spacing":  data["spacing"],   # (3,) float64
     }
 
-
 def make_rgba_overlay(mask_2d: np.ndarray, rgb: tuple, alpha: float = 0.45) -> np.ndarray:
     """Return an RGBA float array from a 2-D binary mask."""
     rgba = np.zeros((*mask_2d.shape, 4), dtype=np.float32)
@@ -70,65 +74,71 @@ def make_rgba_overlay(mask_2d: np.ndarray, rgb: tuple, alpha: float = 0.45) -> n
     rgba[mask_2d > 0,  3] = alpha
     return rgba
 
-
 def draw_bbox(ax, bbox_2d: np.ndarray, color: str, linestyle: str, label: str) -> None:
-    """Draw [x_min, y_min, x_max, y_max] as a rectangle on *ax*."""
-    x0, y0, x1, y1 = bbox_2d
-    w, h = x1 - x0, y1 - y0
+    """Draw [col_min, row_min, col_max, row_max] as a rectangle on *ax*."""
+    c0, r0, c1, r1 = bbox_2d
+    w, h = c1 - c0, r1 - r0
     rect = mpatches.FancyBboxPatch(
-        (x0, y0), w, h,
+        (c0, r0), w, h,
         boxstyle="square,pad=0",
-        linewidth=0.8,     # <--- Thinner walls as requested
+        linewidth=0.8,
         edgecolor=color,
         facecolor="none",
         linestyle=linestyle,
         label=label,
     )
     ax.add_patch(rect)
-    # The inline text label has been removed to avoid covering the bbox
 
+def extract_slice(vol_3d: np.ndarray, axis: int, idx: int) -> np.ndarray:
+    """Extract a 2D slice from a 3D volume along the specified axis."""
+    if axis == 0:
+        return vol_3d[idx, :, :]
+    elif axis == 1:
+        return vol_3d[:, idx, :]
+    elif axis == 2:
+        return vol_3d[:, :, idx]
+    raise ValueError(f"Invalid axis: {axis}")
 
 # ---------------------------------------------------------------------------
 # Per-patient figure
 # ---------------------------------------------------------------------------
 
-def make_patient_figure(patient_id: str, data: dict, modality: str = "both") -> plt.Figure:
+def make_patient_figure(patient_id: str, data: dict, args: argparse.Namespace) -> plt.Figure:
     """
-    Build a summary figure for one patient.
-    Now displays min_z, mid_z, and max_z for each component to evaluate the 3D crop.
+    Build a summary figure for one patient, dynamically viewing along the best axis.
     """
     ct_imgs  = data["ct_imgs"]   # (D, H, W)
     pet_imgs = data["pet_imgs"]  # (D, H, W)
     gts      = data["gts"]       # (D, H, W)
-    D        = ct_imgs.shape[0]
+    D, H, W  = ct_imgs.shape
 
     components_per_label = find_components(
         mask=gts,
-        padding=5,
+        slice_pad=args.slice_pad,
+        planar_pad=args.planar_pad,
         label_values=(1, 2),
     )
 
-    num_mods   = 2 if modality == "both" else 1
-    num_slices = 3 # We want to show min_z, mid_z, max_z
+    num_mods   = 2 if args.modality == "both" else 1
+    num_slices = 3 # min, mid, max
 
     # ── figure geometry ──────────────────────────────────────────────────
     max_comps = max(
         (len(comps) for comps in components_per_label.values()),
         default=1,
     )
-    # columns: max_comps × num_mods × num_slices + 1 overview
-    n_cols   = max_comps * num_mods * num_slices + 1
-    n_rows   = len(LABEL_STYLE)   # one row per label
-    fig_w    = max(14, n_cols * 3.2)
-    fig_h    = n_rows * 4.0
+    n_cols = max_comps * num_mods * num_slices + 1
+    n_rows = len(LABEL_STYLE)
+    fig_w  = max(14, n_cols * 3.2)
+    fig_h  = n_rows * 4.0
 
     fig = plt.figure(figsize=(fig_w, fig_h), constrained_layout=True)
     fig.patch.set_facecolor("#111111")
 
     title_text = (
         f"Slicer test — {patient_id}  "
-        f"| D={D} slices  "
-        f"| Modality: {modality.upper()}  "
+        f"| Vol: {D}x{H}x{W}  "
+        f"| Mod: {args.modality.upper()}  "
         f"| labels: {sorted(components_per_label.keys())}"
     )
     fig.suptitle(title_text, color="white", fontsize=11, y=1.01)
@@ -136,101 +146,99 @@ def make_patient_figure(patient_id: str, data: dict, modality: str = "both") -> 
     grid = fig.add_gridspec(n_rows, n_cols, hspace=0.45, wspace=0.08)
 
     # ── overview column (right-most) for each row ─────────────────────
+    # We keep this as a Z-axis (Axial) overview, since it's standard for medical volumes.
     for row_idx, label_id in enumerate(sorted(LABEL_STYLE)):
         ax_ov = fig.add_subplot(grid[row_idx, -1])
         ax_ov.set_facecolor("#1a1a1a")
-        ax_ov.set_title(
-            f"{LABEL_STYLE[label_id]['name']} — z overview",
-            color="white", fontsize=8,
-        )
+        ax_ov.set_title(f"{LABEL_STYLE[label_id]['name']} — Z-Axis Overview", color="white", fontsize=8)
         ax_ov.set_xlabel("slice (z)", color="lightgray", fontsize=7)
-        ax_ov.set_ylabel("max cross-section (px²)", color="lightgray", fontsize=7)
+        ax_ov.set_ylabel("area (px²)", color="lightgray", fontsize=7)
         ax_ov.tick_params(colors="lightgray", labelsize=6)
         for spine in ax_ov.spines.values():
             spine.set_edgecolor("#444")
 
-        # Background: area of label_id per slice
         label_area = np.array([(gts[z] == label_id).sum() for z in range(D)])
-        ax_ov.fill_between(
-            range(D), label_area,
-            color=LABEL_STYLE[label_id]["mask_color"], alpha=0.25,
-        )
-        ax_ov.plot(range(D), label_area,
-                   color=LABEL_STYLE[label_id]["mask_color"], lw=1)
+        ax_ov.fill_between(range(D), label_area, color=LABEL_STYLE[label_id]["mask_color"], alpha=0.25)
+        ax_ov.plot(range(D), label_area, color=LABEL_STYLE[label_id]["mask_color"], lw=1)
 
-        # Mark key slices for each component
         comps = components_per_label.get(label_id, [])
         for c_idx, comp in enumerate(comps):
-            lskey   = LINE_STYLES[c_idx % len(LINE_STYLES)]
-            bcolor  = LABEL_STYLE[label_id]["bbox_color"]
-            z0, z1  = comp["bbox_voxel"]["z"]
-            ax_ov.axvspan(z0, z1, alpha=0.18, color=bcolor)
-            ax_ov.axvline(comp["z_mid"], color=bcolor, lw=1.5,
-                          linestyle=lskey,
-                          label=f"comp {comp['component_id']} z_mid={comp['z_mid']}")
+            bcolor = LABEL_STYLE[label_id]["bbox_color"]
+            z0, z1 = comp["bbox_voxel"]["z"]
+            ax_ov.axvspan(z0, z1, alpha=0.18, color=bcolor, 
+                          label=f"comp {comp['component_id']} (z:{z0}-{z1})")
         if comps:
-            ax_ov.legend(fontsize=5.5, loc="upper right",
-                         labelcolor="white", facecolor="#222", edgecolor="#555")
+            ax_ov.legend(fontsize=5.5, loc="upper right", labelcolor="white", facecolor="#222", edgecolor="#555")
 
     # ── per-component panels ──────────────────────────────────────────
     for row_idx, label_id in enumerate(sorted(LABEL_STYLE)):
-        style  = LABEL_STYLE[label_id]
-        comps  = components_per_label.get(label_id, [])
+        style = LABEL_STYLE[label_id]
+        comps = components_per_label.get(label_id, [])
 
         if not comps:
             ax = fig.add_subplot(grid[row_idx, 0:n_cols - 1])
             ax.set_facecolor("#1a1a1a")
-            ax.text(0.5, 0.5,
-                    f"{style['name']} — not present in this patient",
-                    ha="center", va="center",
-                    color="gray", fontsize=10, transform=ax.transAxes)
+            ax.text(0.5, 0.5, f"{style['name']} — not present", ha="center", va="center", color="gray")
             ax.axis("off")
             continue
 
         for c_idx, comp in enumerate(comps):
-            # Extract z boundaries[cite: 3]
-            z_min = comp["bbox_voxel"]["z"][0]
-            z_max = comp["bbox_voxel"]["z"][1] - 1  # -1 because z1 is exclusive
-            z_mid = comp["z_mid"]
+            p_axis = comp["primary_axis"]
+            mid_idx = comp["mid_slice"]
+            
+            # Find tight min/max along the primary axis using the cropped mask
+            mask_indices = np.where(comp["cropped_mask"])
+            
+            if len(mask_indices[0]) > 0:
+                rel_min = mask_indices[p_axis].min()
+                rel_max = mask_indices[p_axis].max()
+                
+                # Convert relative crop index back to absolute volume index
+                if p_axis == 0:
+                    base_idx = comp["bbox_voxel"]["z"][0]
+                elif p_axis == 1:
+                    base_idx = comp["bbox_voxel"]["y"][0]
+                else:
+                    base_idx = comp["bbox_voxel"]["x"][0]
+                
+                tight_min = base_idx + rel_min
+                tight_max = base_idx + rel_max
+            else:
+                tight_min = tight_max = mid_idx
 
-            # Use the 3D bounding box projected to XY instead of the 2D tight one
-            # to properly evaluate the 3D crop bounds[cite: 3].
-            x0, x1 = comp["bbox_voxel"]["x"]
-            y0, y1 = comp["bbox_voxel"]["y"]
-            bbox_xy = np.array([x0, y0, x1, y1])
-
-            ls   = LINE_STYLES[c_idx % len(LINE_STYLES)]
-            bc   = style["bbox_color"]
+            ls = LINE_STYLES[c_idx % len(LINE_STYLES)]
+            bc = style["bbox_color"]
 
             comp_base_label = (
                 f"{style['name']} #{comp['component_id']}  "
                 f"vox={comp['voxel_count']:,}"
             )
 
-            # Offset based on how many modalities and slices we render
             col_base = c_idx * (num_mods * num_slices)   
 
             slices_to_show = [
-                (z_min, "min_z"),
-                (z_mid, "mid_z"),
-                (z_max, "max_z")
+                (tight_min, f"min_{AXIS_LABELS[p_axis]}"),
+                (mid_idx,   f"mid_{AXIS_LABELS[p_axis]}"),
+                (tight_max, f"max_{AXIS_LABELS[p_axis]}")
             ]
 
-            for s_idx, (z, z_label) in enumerate(slices_to_show):
-                
-                z = max(0, min(D - 1, z)) # Safety clamp
+            max_vol_idx = ct_imgs.shape[p_axis] - 1
 
-                gt_slice  = gts[z]
-                ct_slice  = ct_imgs[z]
-                pet_slice = pet_imgs[z]
+            for s_idx, (idx, slice_label) in enumerate(slices_to_show):
+                # Safety clamp
+                idx = max(0, min(max_vol_idx, idx)) 
+
+                gt_slice  = extract_slice(gts, p_axis, idx)
+                ct_slice  = extract_slice(ct_imgs, p_axis, idx)
+                pet_slice = extract_slice(pet_imgs, p_axis, idx)
 
                 gt_label_slice = (gt_slice == label_id).astype(np.uint8)
                 gt_rgba = make_rgba_overlay(gt_label_slice, style["mask_color"], alpha=0.45)
 
                 mods_to_show = []
-                if modality in ["ct", "both"]:
+                if args.modality in ["ct", "both"]:
                     mods_to_show.append((ct_slice, "CT"))
-                if modality in ["pet", "both"]:
+                if args.modality in ["pet", "both"]:
                     mods_to_show.append((pet_slice, "PET"))
 
                 for mod_idx, (img_slice, mod_name) in enumerate(mods_to_show):
@@ -238,13 +246,14 @@ def make_patient_figure(patient_id: str, data: dict, modality: str = "both") -> 
                     ax = fig.add_subplot(grid[row_idx, col_idx])
                     ax.set_facecolor("#1a1a1a")
 
+                    # Draw image
                     ax.imshow(img_slice, cmap="gray", interpolation="nearest")
                     ax.imshow(gt_rgba,   interpolation="nearest")
 
-                    draw_bbox(ax, bbox_xy, color=bc, linestyle=ls, label=comp_base_label)
+                    # Draw bounding box (bbox_2d is already computed by slicer.py to match this plane)
+                    draw_bbox(ax, comp["bbox_2d"], color=bc, linestyle=ls, label=comp_base_label)
 
-                    # Metadata is neatly placed out of the way in the title
-                    title = f"{comp_base_label}\n{z_label}: z={z} [{mod_name}]"
+                    title = f"{comp_base_label}\n[{AXIS_NAMES[p_axis]}] {slice_label}: {idx} | {mod_name}"
                     ax.set_title(title, color="white", fontsize=8, pad=4)
                     ax.axis("off")
 
@@ -266,8 +275,7 @@ def main(args: argparse.Namespace) -> None:
 
     random.seed(args.seed)
     selected = random.sample(npz_files, min(args.k, len(npz_files)))
-    print(f"Testing slicer on {len(selected)} / {len(npz_files)} patients "
-          f"from {npz_dir}\n")
+    print(f"Testing slicer on {len(selected)} / {len(npz_files)} patients from {npz_dir}\n")
 
     for npz_path in selected:
         patient_id = npz_path.stem
@@ -275,12 +283,14 @@ def main(args: argparse.Namespace) -> None:
 
         data = load_npz(npz_path)
         gts  = data["gts"]
-        D    = gts.shape[0]
 
-        # ── console summary ────────────────────────────────────────────
         components_per_label = find_components(
-            mask=gts, padding=5, label_values=(1, 2)
+            mask=gts, 
+            slice_pad=args.slice_pad, 
+            planar_pad=args.planar_pad, 
+            label_values=(1, 2)
         )
+
         if not components_per_label:
             print("    [WARN] no foreground labels found — skipping figure.")
             continue
@@ -289,19 +299,18 @@ def main(args: argparse.Namespace) -> None:
             name = LABEL_STYLE[label_id]["name"]
             print(f"    {name}: {len(comps)} component(s)")
             for comp in comps:
-                z0, z1 = comp["bbox_voxel"]["z"]
+                p_axis = comp['primary_axis']
                 print(
                     f"      comp {comp['component_id']:2d} | "
                     f"voxels={comp['voxel_count']:6,} | "
-                    f"z_range=[{z0},{z1}]  z_mid={comp['z_mid']} | "
-                    f"bbox={comp['bbox_2d'].tolist()}"
+                    f"axis={AXIS_NAMES[p_axis]} | "
+                    f"mid_slice={comp['mid_slice']} | "
+                    f"bbox_2d={comp['bbox_2d'].tolist()}"
                 )
 
-        # ── figure ────────────────────────────────────────────────────
-        fig = make_patient_figure(patient_id, data, args.modality)
+        fig = make_patient_figure(patient_id, data, args)
         out_path = output_dir / f"{patient_id}_slicer_test.png"
-        fig.savefig(out_path, dpi=150, bbox_inches="tight",
-                    facecolor=fig.get_facecolor())
+        fig.savefig(out_path, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
         plt.close(fig)
         print(f"    Saved → {out_path}\n")
 
@@ -313,29 +322,12 @@ def main(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Visual smoke-test for slicer.py bounding-box extraction."
-    )
-    parser.add_argument(
-        "--npz_dir", type=str,
-        default="/data/ethan/MedSAM2/hecktor_npz/val",
-        help="Directory containing prepared HECKTOR NPZ files.",
-    )
-    parser.add_argument(
-        "--output_dir", type=str,
-        default="/data/ethan/MedSAM2/slicer_test",
-        help="Where to save the output PNG figures.",
-    )
-    parser.add_argument(
-        "--k", type=int, default=5,
-        help="Number of patients to sample and visualise.",
-    )
-    parser.add_argument(
-        "--seed", type=int, default=42,
-        help="Random seed for patient sampling.",
-    )
-    parser.add_argument(
-        "--modality", type=str, choices=["ct", "pet", "both"], default="both",
-        help="Which imaging modality to display the overlay on.",
-    )
+    parser = argparse.ArgumentParser(description="Visual smoke-test for slicer.py extraction.")
+    parser.add_argument("--npz_dir", type=str, default="/data/ethan/MedSAM2/hecktor_npz/val")
+    parser.add_argument("--output_dir", type=str, default="/data/ethan/MedSAM2/slicer_test")
+    parser.add_argument("--k", type=int, default=5, help="Number of patients to sample.")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    parser.add_argument("--modality", type=str, choices=["ct", "pet", "both"], default="both")
+    parser.add_argument("--slice_pad", type=int, default=1, help="Padding on the primary viewing axis.")
+    parser.add_argument("--planar_pad", type=int, default=5, help="Padding on the planar dimensions.")
     main(parser.parse_args())
