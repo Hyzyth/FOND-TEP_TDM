@@ -58,16 +58,15 @@ NPZ_DIR="/data/ethan/MedSAM2/hecktor_npz/val"
 OUT_DIR="/data/ethan/MedSAM2/slicer_test_${MODALITY}" 
 K=5
 SEED=42
-
-# Optional: If you use a virtual environment or conda, uncomment and adapt below:
-# source /path/to/venv/bin/activate
-# conda activate medsam2
+SLICE_PAD=1   # Padding along the "depth" axis of the view
+PLANAR_PAD=5  # Padding along the 2D plane of the view
 
 mkdir -p "$OUT_DIR"
 
 echo "========================================"
 echo "  MedSAM2 — Running Slicer Test"
 echo "  Modality:   $MODALITY"
+echo "  Padding:    Slice=$SLICE_PAD | Planar=$PLANAR_PAD"
 echo "  Input dir:  $NPZ_DIR"
 echo "  Output dir: $OUT_DIR"
 echo "========================================"
@@ -81,7 +80,9 @@ python test_slicer.py \
     --output_dir "$OUT_DIR" \
     --k "$K" \
     --seed "$SEED" \
-    --modality "$MODALITY"
+    --modality "$MODALITY" \
+    --slice_pad "$SLICE_PAD" \
+    --planar_pad "$PLANAR_PAD"
 
 echo ""
 echo "Done! Check $OUT_DIR for the generated figures."
