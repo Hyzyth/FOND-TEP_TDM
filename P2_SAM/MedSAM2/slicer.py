@@ -69,7 +69,8 @@ def voxel_to_world(affine: np.ndarray, z: int, y: int, x: int) -> np.ndarray:
 def find_all_components_for_label(
     mask: np.ndarray,
     label_value: int,
-    padding: int = 0,
+    slice_pad: int = 1,
+    planar_pad: int = 5,
     affine: np.ndarray = None,
 ):
     """Find every connected component for a single label value.
@@ -78,7 +79,8 @@ def find_all_components_for_label(
     ----------
     mask        : (D, H, W) int array
     label_value : int  – label to search (1 = GTVp, 2 = GTVn)
-    padding     : int  – voxel padding added to the bounding box on each side
+    slice_pad   : int  – padding applied along the primary "viewing" axis
+    planar_pad  : int  – padding applied along the two planar axes forming the slice
     affine      : (4,4) array or None  – when given, world-space bbox is added
 
     Returns
@@ -99,47 +101,82 @@ def find_all_components_for_label(
         return []
 
     labeled_arr, num_components = label(mask_label)
-
     results = []
+
+    D, H, W = mask.shape
+    
     for comp_id in range(1, num_components + 1):
         comp_mask = (labeled_arr == comp_id)
-
-        z_indices, y_indices, x_indices = np.where(comp_mask)
-        if len(z_indices) == 0:
+        indices = np.where(comp_mask)
+        
+        if len(indices[0]) == 0:
             continue
 
-        # Bounding box (with padding, clamped to array bounds)
-        D, H, W = mask.shape
-        z0 = max(0, int(z_indices.min()) - padding)
-        z1 = min(D, int(z_indices.max()) + 1 + padding)
-        y0 = max(0, int(y_indices.min()) - padding)
-        y1 = min(H, int(y_indices.max()) + 1 + padding)
-        x0 = max(0, int(x_indices.min()) - padding)
-        x1 = min(W, int(x_indices.max()) + 1 + padding)
+        # Get tight bounds to optimize the area search
+        z_min, z_max = indices[0].min(), indices[0].max()
+        y_min, y_max = indices[1].min(), indices[1].max()
+        x_min, x_max = indices[2].min(), indices[2].max()
+
+        max_area = -1
+        primary_axis = 0
+        mid_slice = 0
+
+        # Check Axis 0 (Z-axis / Axial plane)
+        for z in range(z_min, z_max + 1):
+            area = comp_mask[z, y_min:y_max+1, x_min:x_max+1].sum()
+            if area > max_area:
+                max_area, primary_axis, mid_slice = area, 0, z
+
+        # Check Axis 1 (Y-axis / Coronal plane)
+        for y in range(y_min, y_max + 1):
+            area = comp_mask[z_min:z_max+1, y, x_min:x_max+1].sum()
+            if area > max_area:
+                max_area, primary_axis, mid_slice = area, 1, y
+
+        # Check Axis 2 (X-axis / Sagittal plane)
+        for x in range(x_min, x_max + 1):
+            area = comp_mask[z_min:z_max+1, y_min:y_max+1, x].sum()
+            if area > max_area:
+                max_area, primary_axis, mid_slice = area, 2, x
+
+        # Assign padding dynamically based on the optimal viewing axis
+        pads = [0, 0, 0]
+        pads[primary_axis] = slice_pad
+        pads[(primary_axis + 1) % 3] = planar_pad
+        pads[(primary_axis + 2) % 3] = planar_pad
+        pad_z, pad_y, pad_x = pads
+
+        # 3D Bounding box (with dynamic padding, clamped to array bounds)
+        z0 = max(0, int(z_min) - pad_z)
+        z1 = min(D, int(z_max) + 1 + pad_z)
+        y0 = max(0, int(y_min) - pad_y)
+        y1 = min(H, int(y_max) + 1 + pad_y)
+        x0 = max(0, int(x_min) - pad_x)
+        x1 = min(W, int(x_max) + 1 + pad_x)
 
         cropped_mask = comp_mask[z0:z1, y0:y1, x0:x1]
         voxel_count  = int(np.sum(comp_mask))
 
-        # Key slice: axial index with the largest 2-D cross-section
-        areas = np.array([
-            comp_mask[z].sum() for z in range(z0, z1)
-        ])
-        z_mid = z0 + int(np.argmax(areas))
-
-        # 2-D bounding box on the key slice (SAM2 format: x_min,y_min,x_max,y_max)
-        ys_mid, xs_mid = np.where(comp_mask[z_mid])
-        bbox_2d = np.array([
-            int(xs_mid.min()), int(ys_mid.min()),
-            int(xs_mid.max()), int(ys_mid.max()),
-        ], dtype=np.int32)
+        # 2D Bounding box format depends on which axis we are viewing from.
+        # Format is always [col_min, row_min, col_max, row_max] relative to the 2D slice.
+        if primary_axis == 0:
+            # Viewing Z. Planar image is (Y, X). Row=Y, Col=X.
+            bbox_2d = np.array([x0, y0, x1, y1], dtype=np.int32)
+        elif primary_axis == 1:
+            # Viewing Y. Planar image is (Z, X). Row=Z, Col=X.
+            bbox_2d = np.array([x0, z0, x1, z1], dtype=np.int32)
+        elif primary_axis == 2:
+            # Viewing X. Planar image is (Z, Y). Row=Z, Col=Y.
+            bbox_2d = np.array([y0, z0, y1, z1], dtype=np.int32)
 
         result = {
             "label":        int(label_value),
             "component_id": int(comp_id),
             "voxel_count":  voxel_count,
-            "z_mid":        z_mid,
+            "primary_axis": primary_axis,  # 0=Z, 1=Y, 2=X
+            "mid_slice":    mid_slice,     # The index along the primary_axis
             "bbox_voxel":   {"z": (z0, z1), "y": (y0, y1), "x": (x0, x1)},
-            "bbox_2d":      bbox_2d,   # [x_min, y_min, x_max, y_max] on z_mid
+            "bbox_2d":      bbox_2d,
             "cropped_mask": cropped_mask,
         }
 
@@ -157,31 +194,18 @@ def find_all_components_for_label(
 
 def find_components(
     mask: np.ndarray,
-    padding: int = 0,
+    slice_pad: int = 1,
+    planar_pad: int = 5,
     affine: np.ndarray = None,
     label_values=(1, 2),
 ) -> dict:
-    """Find all connected components for each label in *label_values*.
-
-    Parameters
-    ----------
-    mask         : (D, H, W) int array  (0=bg, 1=GTVp, 2=GTVn)
-    padding      : int  voxel padding for bounding boxes
-    affine       : (4,4) or None
-    label_values : iterable[int]  labels to process
-
-    Returns
-    -------
-    dict mapping label_id → list of component dicts (sorted largest-first).
-    Only labels actually present in the mask are included.
-    """
-    # FIX: compute components once per label, not twice (was calling
-    # find_all_components_for_label in both the dict comprehension value
-    # and the `if` filter, doubling work on every label).
+    """Find all connected components for each label in *label_values*."""
     present = set(np.unique(mask).tolist()).intersection(set(label_values))
     result = {}
     for lv in present:
-        comps = find_all_components_for_label(mask, lv, padding=padding, affine=affine)
+        comps = find_all_components_for_label(
+            mask, lv, slice_pad=slice_pad, planar_pad=planar_pad, affine=affine
+        )
         if comps:
             result[lv] = comps
     return result
