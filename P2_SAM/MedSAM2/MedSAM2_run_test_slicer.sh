@@ -11,6 +11,36 @@
 set -e
 
 # =============================================================================
+# STEP 0 — Environment setup (uv + venv + requirements)
+# =============================================================================
+
+if ! command -v uv &> /dev/null; then
+    echo "uv not found — installing..."
+    wget -qO- https://astral.sh/uv/install.sh | sh
+    source "$HOME/.local/bin/env"
+fi
+
+uv python install 3.10
+
+if [ ! -d "medsam2_env" ]; then
+    uv venv medsam2_env --python 3.10
+fi
+
+source medsam2_env/bin/activate
+
+if [ -f requirements.txt ]; then
+    uv pip install -r requirements.txt
+else
+    echo "requirements.txt not found! Aborting."
+    exit 1
+fi
+
+# Install the package itself in editable mode if not already done
+if ! python -c "import sam2" &>/dev/null; then
+    pip install -e . --no-build-isolation
+fi
+
+# =============================================================================
 # STEP 1 — Configuration & Environment
 # =============================================================================
 

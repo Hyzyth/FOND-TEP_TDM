@@ -5,11 +5,11 @@ Visual smoke-test for slicer.py.
 
 For each of the k sampled patients in the val (or train) NPZ directory:
   - Runs find_components() on the GT mask
-  - For every detected component, renders the key slice with
+  - For every detected component, renders THREE slices (min_z, mid_z, max_z) with:
     - CT background, PET background, or both
     - GT mask overlay (semi-transparent)
-    - Predicted bounding box
-    - Component metadata (label, id, voxel count, z_mid)
+    - Predicted 3D bounding box footprint (XY)
+    - Component metadata in the title (label, id, voxel count, z_index)
   - Saves one PNG summary figure per patient under --output_dir
 
 Usage
@@ -18,7 +18,7 @@ python test_slicer.py \
     --npz_dir  /data/ethan/MedSAM2/hecktor_npz/val \
     --output_dir /data/ethan/MedSAM2/slicer_test \
     --k 5 \
-    --seed 42
+    --seed 42 \
     --modality both
 """
 
@@ -46,8 +46,6 @@ LABEL_STYLE = {
     1: dict(name="GTVp", mask_color=(1.00, 0.20, 0.20), bbox_color="tomato"),
     2: dict(name="GTVn", mask_color=(0.20, 0.55, 1.00), bbox_color="deepskyblue"),
 }
-# Distinct per-component box styles (dashed vs solid) so multiple components
-# of the same label are still visually separable.
 LINE_STYLES = ["solid", "dashed", "dotted", "dashdot"]
 
 
@@ -80,20 +78,14 @@ def draw_bbox(ax, bbox_2d: np.ndarray, color: str, linestyle: str, label: str) -
     rect = mpatches.FancyBboxPatch(
         (x0, y0), w, h,
         boxstyle="square,pad=0",
-        linewidth=2,
+        linewidth=0.8,     # <--- Thinner walls as requested
         edgecolor=color,
         facecolor="none",
         linestyle=linestyle,
         label=label,
     )
     ax.add_patch(rect)
-    # Corner label
-    ax.text(
-        x0 + 2, y0 + 2, label,
-        fontsize=7, color=color,
-        va="top", ha="left",
-        bbox=dict(boxstyle="round,pad=0.1", facecolor="black", alpha=0.55, linewidth=0),
-    )
+    # The inline text label has been removed to avoid covering the bbox
 
 
 # ---------------------------------------------------------------------------
@@ -103,13 +95,7 @@ def draw_bbox(ax, bbox_2d: np.ndarray, color: str, linestyle: str, label: str) -
 def make_patient_figure(patient_id: str, data: dict, modality: str = "both") -> plt.Figure:
     """
     Build a summary figure for one patient.
-
-    Layout
-    ------
-    Two rows of panels, one per label (GTVp / GTVn).
-    Each component occupies a pair of columns (CT | PET).
-    An additional overview column on the right shows the full z-stack with
-    component z-ranges marked.
+    Now displays min_z, mid_z, and max_z for each component to evaluate the 3D crop.
     """
     ct_imgs  = data["ct_imgs"]   # (D, H, W)
     pet_imgs = data["pet_imgs"]  # (D, H, W)
@@ -122,17 +108,16 @@ def make_patient_figure(patient_id: str, data: dict, modality: str = "both") -> 
         label_values=(1, 2),
     )
 
-    # Determine how many imaging columns per component
-    num_mods = 2 if modality == "both" else 1
+    num_mods   = 2 if modality == "both" else 1
+    num_slices = 3 # We want to show min_z, mid_z, max_z
 
     # ── figure geometry ──────────────────────────────────────────────────
-    # Find the maximum number of components across labels
     max_comps = max(
         (len(comps) for comps in components_per_label.values()),
         default=1,
     )
-    # columns: max_comps × num_mods + 1 overview
-    n_cols   = max_comps * num_mods + 1
+    # columns: max_comps × num_mods × num_slices + 1 overview
+    n_cols   = max_comps * num_mods * num_slices + 1
     n_rows   = len(LABEL_STYLE)   # one row per label
     fig_w    = max(14, n_cols * 3.2)
     fig_h    = n_rows * 4.0
@@ -148,7 +133,7 @@ def make_patient_figure(patient_id: str, data: dict, modality: str = "both") -> 
     )
     fig.suptitle(title_text, color="white", fontsize=11, y=1.01)
 
-    grid = fig.add_gridspec(n_rows, n_cols, hspace=0.35, wspace=0.08)
+    grid = fig.add_gridspec(n_rows, n_cols, hspace=0.45, wspace=0.08)
 
     # ── overview column (right-most) for each row ─────────────────────
     for row_idx, label_id in enumerate(sorted(LABEL_STYLE)):
@@ -193,7 +178,6 @@ def make_patient_figure(patient_id: str, data: dict, modality: str = "both") -> 
         comps  = components_per_label.get(label_id, [])
 
         if not comps:
-            # Empty label: grey placeholder
             ax = fig.add_subplot(grid[row_idx, 0:n_cols - 1])
             ax.set_facecolor("#1a1a1a")
             ax.text(0.5, 0.5,
@@ -204,45 +188,65 @@ def make_patient_figure(patient_id: str, data: dict, modality: str = "both") -> 
             continue
 
         for c_idx, comp in enumerate(comps):
-            z    = comp["z_mid"]
-            bbox = comp["bbox_2d"]    # [x_min, y_min, x_max, y_max]
+            # Extract z boundaries[cite: 3]
+            z_min = comp["bbox_voxel"]["z"][0]
+            z_max = comp["bbox_voxel"]["z"][1] - 1  # -1 because z1 is exclusive
+            z_mid = comp["z_mid"]
+
+            # Use the 3D bounding box projected to XY instead of the 2D tight one
+            # to properly evaluate the 3D crop bounds[cite: 3].
+            x0, x1 = comp["bbox_voxel"]["x"]
+            y0, y1 = comp["bbox_voxel"]["y"]
+            bbox_xy = np.array([x0, y0, x1, y1])
+
             ls   = LINE_STYLES[c_idx % len(LINE_STYLES)]
             bc   = style["bbox_color"]
 
-            gt_slice  = gts[z]
-            ct_slice  = ct_imgs[z]
-            pet_slice = pet_imgs[z]
-
-            # Build 2-D GT mask for this label only
-            gt_label_slice = (gt_slice == label_id).astype(np.uint8)
-            gt_rgba = make_rgba_overlay(gt_label_slice, style["mask_color"], alpha=0.45)
-
-            comp_label = (
+            comp_base_label = (
                 f"{style['name']} #{comp['component_id']}  "
-                f"z={z}  vox={comp['voxel_count']:,}"
+                f"vox={comp['voxel_count']:,}"
             )
 
-            col_base = c_idx * num_mods   # offset based on how many modalities we render
+            # Offset based on how many modalities and slices we render
+            col_base = c_idx * (num_mods * num_slices)   
 
-            # Decide which images to loop over
-            mods_to_show = []
-            if modality in ["ct", "both"]:
-                mods_to_show.append((ct_slice, "CT"))
-            if modality in ["pet", "both"]:
-                mods_to_show.append((pet_slice, "PET"))
+            slices_to_show = [
+                (z_min, "min_z"),
+                (z_mid, "mid_z"),
+                (z_max, "max_z")
+            ]
 
-            for mod_idx, (img_slice, mod_name) in enumerate(mods_to_show):
-                ax = fig.add_subplot(grid[row_idx, col_base + mod_idx])
-                ax.set_facecolor("#1a1a1a")
+            for s_idx, (z, z_label) in enumerate(slices_to_show):
+                
+                z = max(0, min(D - 1, z)) # Safety clamp
 
-                ax.imshow(img_slice, cmap="gray", interpolation="nearest")
-                ax.imshow(gt_rgba,   interpolation="nearest")
+                gt_slice  = gts[z]
+                ct_slice  = ct_imgs[z]
+                pet_slice = pet_imgs[z]
 
-                draw_bbox(ax, bbox, color=bc, linestyle=ls, label=comp_label)
+                gt_label_slice = (gt_slice == label_id).astype(np.uint8)
+                gt_rgba = make_rgba_overlay(gt_label_slice, style["mask_color"], alpha=0.45)
 
-                title = f"{comp_label}\n[{mod_name}]"
-                ax.set_title(title, color="white", fontsize=7, pad=3)
-                ax.axis("off")
+                mods_to_show = []
+                if modality in ["ct", "both"]:
+                    mods_to_show.append((ct_slice, "CT"))
+                if modality in ["pet", "both"]:
+                    mods_to_show.append((pet_slice, "PET"))
+
+                for mod_idx, (img_slice, mod_name) in enumerate(mods_to_show):
+                    col_idx = col_base + (s_idx * num_mods) + mod_idx
+                    ax = fig.add_subplot(grid[row_idx, col_idx])
+                    ax.set_facecolor("#1a1a1a")
+
+                    ax.imshow(img_slice, cmap="gray", interpolation="nearest")
+                    ax.imshow(gt_rgba,   interpolation="nearest")
+
+                    draw_bbox(ax, bbox_xy, color=bc, linestyle=ls, label=comp_base_label)
+
+                    # Metadata is neatly placed out of the way in the title
+                    title = f"{comp_base_label}\n{z_label}: z={z} [{mod_name}]"
+                    ax.set_title(title, color="white", fontsize=8, pad=4)
+                    ax.axis("off")
 
     return fig
 
