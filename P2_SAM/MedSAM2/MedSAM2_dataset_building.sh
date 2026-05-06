@@ -53,7 +53,7 @@ fi
 # STEP 1 — Path configuration
 # =============================================================================
 
-DATA_DIR=/data/santiago/HECKTOR_data/Task_1_segmentation
+DATA_DIR=/data/santiago/HECKTOR_data/2025/Task_1_segmentation
 OUTPUT_DIR=/data/ethan/MedSAM2/hecktor_npz
 
 mkdir -p "$OUTPUT_DIR"
