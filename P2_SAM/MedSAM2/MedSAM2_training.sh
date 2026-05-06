@@ -58,7 +58,7 @@ echo "========================================"
 # =============================================================================
 
 # CUDA_VISIBLE_DEVICES=0 python3.10 -u training/train.py \
-#     --config  sam2.1_hiera_tiny_hecktor \
+#     --config  $CONFIG \
 #     dataset.train_folder="$NPZ_DIR/train" \
 #     dataset.val_folder="$NPZ_DIR/val" \
 #     scratch.num_epochs=2 \
@@ -70,7 +70,7 @@ echo "========================================"
 # STEP 2B — Full training from scratch  [ACTIVE]
 #
 # Parameter notes:
-#   sam2.1_hiera_tiny_hecktor : HECKTOR-specific config (HECKTORNPZRawDataset,
+#   $CONFIG : HECKTOR-specific config (HECKTORNPZRawDataset,
 #                               max_num_objects=2, num_frames=8)
 #   batch_size 2              : 512px x 3ch x bfloat16 — raise to 4 if VRAM allows
 #   num_epochs 75             : adjust to your compute budget
@@ -81,7 +81,7 @@ echo "========================================"
 CUDA_VISIBLE_DEVICES=0 \
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 python3.10 -u training/train.py \
-    --config  sam2.1_hiera_tiny_hecktor \
+    --config  $CONFIG \
     dataset.train_folder="$NPZ_DIR/train" \
     dataset.val_folder="$NPZ_DIR/val" \
     launcher.experiment_log_dir="$RUNS_ROOT/$MODEL_DIR" \
@@ -96,7 +96,7 @@ python3.10 -u training/train.py \
 # CUDA_VISIBLE_DEVICES=0 \
 # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 # python3.10 -u training/train.py \
-#     --config  sam2.1_hiera_tiny_hecktor \
+#     --config  $CONFIG \
 #     dataset.train_folder="$NPZ_DIR/train" \
 #     dataset.val_folder="$NPZ_DIR/val" \
 #     launcher.experiment_log_dir="$RUNS_ROOT/$MODEL_DIR" \
