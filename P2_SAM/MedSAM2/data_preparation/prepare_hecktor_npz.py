@@ -103,12 +103,7 @@ def find_file(directory: Path, patterns: list, patient_id: str) -> Optional[Path
     return None
 
 
-def resample_to_reference(
-    moving: sitk.Image,
-    reference: sitk.Image,
-    interpolator=sitk.sitkLinear,
-    default_value: float = 0.0,
-) -> sitk.Image:
+def resample_to_reference(moving, reference, interpolator=sitk.sitkLinear, default_value=0.0) -> sitk.Image:
     """Resample *moving* to the voxel grid defined by *reference*."""
     resampler = sitk.ResampleImageFilter()
     resampler.SetReferenceImage(reference)
@@ -128,19 +123,31 @@ def window_ct(ct_array: np.ndarray, low: int, high: int) -> np.ndarray:
 def normalise_pet(
     pet_array: np.ndarray,
     suv_max: Optional[float] = None,
-) -> np.ndarray:
+    return_scale: bool = False,
+) -> np.ndarray | Tuple[np.ndarray, float]:
     """Normalise PET SUV values to uint8 [0, 255].
-    
-    Clips the array at ``suv_max`` (or the 99th percentile when *suv_max*
-    is ``None``) then linearly maps to [0, 255].
+
+    Parameters
+    ----------
+    pet_array    : raw SUV array (float32)
+    suv_max      : fixed SUV ceiling; uses 99th percentile when None
+    return_scale : when True, also return the actual ceiling used
+
+    Returns
+    -------
+    pet_uint8            when return_scale is False
+    (pet_uint8, ceiling) when return_scale is True
     """
     pet_array = pet_array.astype(np.float32)
     pet_array = np.clip(pet_array, 0.0, None)
     upper = suv_max if suv_max is not None else float(np.percentile(pet_array, 99))
     if upper <= 0:
         upper = 1.0
-    pet_norm = np.clip(pet_array / upper * 255.0, 0.0, 255.0)
-    return pet_norm.astype(np.uint8)
+    pet_norm = np.clip(pet_array / upper * 255.0, 0.0, 255.0).astype(np.uint8)
+
+    if return_scale:
+        return pet_norm, upper
+    return pet_norm
 
 
 def crop_to_foreground(
@@ -228,7 +235,12 @@ def process_patient(
 
     # ── Preprocess intensities ───────────────────────────────────────────
     ct_imgs  = window_ct(ct_array,  ct_window_low, ct_window_high)
-    pet_imgs = normalise_pet(pet_array, pet_suv_max)
+    # --- CHANGED: capture the actual SUV ceiling used ---
+    pet_imgs, actual_suv_max = normalise_pet(
+        pet_array,
+        suv_max=pet_suv_max,
+        return_scale=True,      # <-- new
+    )
 
     # ── Optional axial crop ──────────────────────────────────────────────
     if crop_z:
@@ -237,11 +249,12 @@ def process_patient(
         )
 
     return {
-        "ct_imgs":    ct_imgs,
-        "pet_imgs":   pet_imgs,
-        "gts":        gts,
-        "spacing":    spacing,
-        "patient_id": patient_id,
+        "ct_imgs":      ct_imgs,
+        "pet_imgs":     pet_imgs,
+        "gts":          gts,
+        "spacing":      spacing,
+        "patient_id":   patient_id,
+        "pet_suv_max":  np.float32(actual_suv_max),   # <-- new
     }
 
 
@@ -253,9 +266,7 @@ def main(args: argparse.Namespace) -> None:
     data_root   = Path(args.data_dir)
     output_root = Path(args.output_dir)
 
-    patient_ids = sorted(
-        [p.name for p in data_root.iterdir() if p.is_dir()]
-    )
+    patient_ids = sorted([p.name for p in data_root.iterdir() if p.is_dir()])
     if not patient_ids:
         raise RuntimeError(f"No patient directories found under {data_root}")
 
@@ -297,14 +308,17 @@ def main(args: argparse.Namespace) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"{pid}.npz"
 
+        # --- CHANGED: also save pet_suv_max ---
         np.savez_compressed(
             out_path,
-            ct_imgs  = result["ct_imgs"],
-            pet_imgs = result["pet_imgs"],
-            gts      = result["gts"],
-            spacing  = result["spacing"],
+            ct_imgs     = result["ct_imgs"],
+            pet_imgs    = result["pet_imgs"],
+            gts         = result["gts"],
+            spacing     = result["spacing"],
+            pet_suv_max = result["pet_suv_max"],   # <-- new scalar
         )
-        print(f"  Saved → {out_path}  shape={result['gts'].shape}")
+        print(f"  Saved → {out_path}  shape={result['gts'].shape}  "
+              f"suv_max={result['pet_suv_max']:.2f}")
 
     print(f"\nDone.  Skipped {len(skipped)} patient(s): {skipped}")
     print(f"Output written to: {output_root}")
@@ -318,13 +332,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Convert HECKTOR NIfTI data to MedSAM2 NPZ format."
     )
-    parser.add_argument(
-        "--data_dir", type=str,
+    parser.add_argument("--data_dir", type=str,
         default="/data/santiago/HECKTOR_data/Task_1_segmentation",
         help="Root directory with one sub-folder per patient.",
     )
-    parser.add_argument(
-        "--output_dir", type=str,
+    parser.add_argument("--output_dir", type=str,
         default="/data/ethan/MedSAM2/hecktor_npz",
         help="Output directory for NPZ files.",
     )
