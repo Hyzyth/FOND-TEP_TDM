@@ -89,9 +89,11 @@ def find_all_components_for_label(
         label         : int
         component_id  : int  (1-based)
         voxel_count   : int
-        z_mid         : int  – axial slice with the largest cross-section
+        primary_axis  : int  (0=Z, 1=Y, 2=X)
+        mid_slice     : int  – index along primary_axis with the largest cross-section
         bbox_voxel    : dict  {z:(z0,z1), y:(y0,y1), x:(x0,x1)}
-        bbox_2d       : dict  {z_mid: np.ndarray [x_min,y_min,x_max,y_max]}
+        bbox_2d       : np.ndarray  [col_min, row_min, col_max, row_max]
+                        on the mid_slice plane (in primary-axis coordinates)
         cropped_mask  : np.ndarray  binary, shape of the padded bbox
         bbox_world    : dict  (only if affine is not None)
     """
@@ -241,3 +243,53 @@ def scale_bbox_2d(
         bbox[2] * sx,
         bbox[3] * sy,
     ], dtype=np.float32)
+
+
+# ---------------------------------------------------------------------------
+# NEW: Z-axis prompt extraction for the video predictor
+# ---------------------------------------------------------------------------
+
+def get_z_prompt_from_component(comp: dict) -> tuple:
+    """Extract (z_mid, bbox_2d) always on the axial (Z) axis.
+
+    MedSAM2's slice-by-slice video predictor propagates along Z, so prompts
+    must reference a Z-axis slice regardless of which axis slicer.py chose as
+    the primary viewing axis.
+
+    When ``primary_axis == 0`` this is a no-op (mid_slice already IS z_mid
+    and bbox_2d is already [x_min, y_min, x_max, y_max] on that Z slice).
+
+    When ``primary_axis`` is 1 (Y/coronal) or 2 (X/sagittal), the function
+    finds the Z slice with the largest cross-sectional area using the stored
+    ``cropped_mask``, then returns the padded 3-D bounding-box corners
+    projected onto that slice as bbox_2d.
+
+    Parameters
+    ----------
+    comp : dict
+        One component dict as returned by :func:`find_all_components_for_label`.
+
+    Returns
+    -------
+    z_mid  : int             axial slice index (into the full volume)
+    bbox_2d: np.ndarray(4,)  [x_min, y_min, x_max, y_max] on z_mid
+    """
+    z0, z1 = comp["bbox_voxel"]["z"]
+
+    if comp["primary_axis"] == 0:
+        # mid_slice is already a Z index; bbox_2d already in (x,y) format.
+        return comp["mid_slice"], comp["bbox_2d"]
+
+    # Primary axis is Y or X — derive z_mid from the cropped mask.
+    cropped = comp["cropped_mask"]   # shape (z1-z0, y1-y0, x1-x0)
+    dz = z1 - z0
+    z_areas = np.array([cropped[z].sum() for z in range(dz)])
+    rel_z = int(np.argmax(z_areas))
+    z_mid = z0 + rel_z
+
+    # Use the padded 3-D bounding-box bounds projected onto the Z plane
+    x0, x1 = comp["bbox_voxel"]["x"]
+    y0, y1 = comp["bbox_voxel"]["y"]
+    bbox_2d = np.array([x0, y0, x1, y1], dtype=np.int32)
+
+    return z_mid, bbox_2d
