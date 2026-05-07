@@ -18,16 +18,40 @@ The script:
   4. Saves per-patient NPZ segmentation results and optionally NIfTI masks
      and PNG overlay visualisations.
 
-Usage
------
-python inference/infer_hecktor.py \
-    --checkpoint /data/ethan/MedSAM2/checkpoints/MedSAM2_latest.pt \
-    --cfg sam2/configs/sam2.1_hiera_t512.yaml \
-    --imgs_path /data/ethan/MedSAM2/hecktor_npz/val \
-    --pred_save_dir /data/ethan/MedSAM2/predictions/val \
-    --save_nifti \
-    --save_overlays \
-    --num_workers 1
+Changes from the original
+--------------------------
+* Fixed ``find_components`` call: replaced the non-existent ``padding``
+  keyword with the correct ``slice_pad`` and ``planar_pad`` parameters.
+* Fixed component access: ``comp["z_mid"]`` did not exist in the updated
+  slicer.py; replaced with ``get_z_prompt_from_component(comp)``.
+* Added ``--bbox_mode`` argument (gt | pet | unet | hybrid).
+  - ``gt``     : oracle mode using ground-truth boxes (original behaviour)
+  - ``pet``    : PET-driven proposals from ``auto_prompting.pet_proposals``
+  - ``unet``   : Small3DUNet proposals from ``auto_prompting.proposal_net``
+  - ``hybrid`` : PET ∪ UNet proposals filtered by 3-D IoU (recommended)
+* Added ``--pet_method``    argument (base41 | black | daisne).
+* Added ``--proposal_model`` argument: path to Small3DUNet checkpoint.
+* Loads ``pet_suv_max`` from NPZ when available (required for black/daisne).
+
+Usage (GT / oracle mode – unchanged)
+-------------------------------------
+python inference/infer_hecktor.py \\
+    --checkpoint ./checkpoints/MedSAM2_latest.pt \\
+    --cfg sam2/configs/sam2.1_hiera_t512.yaml \\
+    --imgs_path /data/ethan/MedSAM2/hecktor_npz/val \\
+    --pred_save_dir /data/ethan/MedSAM2/predictions/val \\
+    --bbox_mode gt \\
+    --bbox_shift 5
+
+Usage (auto-prompting – hybrid mode)
+--------------------------------------
+python inference/infer_hecktor.py \\
+    --checkpoint ./checkpoints/MedSAM2_latest.pt \\
+    --cfg sam2/configs/sam2.1_hiera_t512.yaml \\
+    --imgs_path /data/ethan/MedSAM2/hecktor_npz/val \\
+    --pred_save_dir /data/ethan/MedSAM2/predictions/val_auto \\
+    --bbox_mode hybrid \\
+    --proposal_model ./auto_prompting/checkpoints/proposal_net_best.pt
 """
 
 import argparse
@@ -53,7 +77,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from sam2.build_sam import build_sam2_video_predictor_npz
-from slicer import find_components, scale_bbox_2d
+from slicer import find_components, scale_bbox_2d, get_z_prompt_from_component
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -241,9 +265,11 @@ def infer_one_npz(
     npz_path: str,
     predictor,
     pred_save_dir: str,
-    nifti_dir: str | None,
-    overlay_dir: str | None,
+    nifti_dir,
+    overlay_dir,
     bbox_shift: int = 0,
+    bbox_mode: str = "gt",
+    auto_prompter=None,
 ) -> tuple[str, float]:
     """Run MedSAM2 inference on one HECKTOR NPZ file and save results.
 
@@ -255,6 +281,9 @@ def infer_one_npz(
     nifti_dir     : str or None  optional NIfTI output directory
     overlay_dir   : str or None  optional PNG overlay directory
     bbox_shift    : int   extra margin (pixels) added around bounding-box prompts
+    bbox_mode     : 'gt' uses ground-truth boxes (oracle).
+                   'pet' / 'unet' / 'hybrid' use auto_prompter.
+    auto_prompter : AutoPrompter instance (required when bbox_mode != 'gt')
 
     Returns
     -------
@@ -271,6 +300,13 @@ def infer_one_npz(
     gts      = data["gts"]       # (D, H, W) uint8  labels 0/1/2
     spacing  = data["spacing"]   # (3,) float64
 
+    # pet_suv_max is saved by the updated prepare_hecktor_npz.py.
+    # Old NPZ files won't have it; fall back to None gracefully.
+    pet_suv_max = float(data["pet_suv_max"]) if "pet_suv_max" in data else None
+    if pet_suv_max is None and bbox_mode in ("pet", "hybrid"):
+        print(f"  [WARN] pet_suv_max not found in {npz_name}. "
+              "Black/Daisne methods will fall back to base41.")
+
     D, H, W = ct_imgs.shape
     segs_3d  = np.zeros((D, H, W), dtype=np.uint8)
 
@@ -278,27 +314,46 @@ def infer_one_npz(
     img_tensor = fuse_ct_pet_to_tensor(ct_imgs, pet_imgs, MODEL_IMG_SIZE).cuda()
     orig_hw = (H, W)
 
-    # ── Use slicer.py to find per-label connected components + prompts ───
-    # Process labels in ascending order so GTVp (1) is written before
-    # GTVn (2); the guarded write in propagate_one_component then ensures
-    # GTVn can never overwrite GTVp voxels.
-    components_per_label = find_components(
-        mask        = gts,
-        padding     = bbox_shift,
-        label_values= (LABEL_GTVp, LABEL_GTVn),
-    )
+    # ── Get bounding-box prompts ──────────────────────────────────────────
+    if bbox_mode == "gt":
+        # --- FIXED: was `padding=bbox_shift` (TypeError) ---
+        components_per_label = find_components(
+            mask       = gts,
+            slice_pad  = bbox_shift,    # ← corrected parameter name
+            planar_pad = bbox_shift,    # ← corrected parameter name
+            label_values = (LABEL_GTVp, LABEL_GTVn),
+        )
+    else:
+        # Auto-prompting mode
+        if auto_prompter is None:
+            raise RuntimeError(
+                f"bbox_mode='{bbox_mode}' requires an AutoPrompter instance. "
+                "Pass --proposal_model or use --bbox_mode gt."
+            )
+        components_per_label = auto_prompter.get_proposals(
+            ct_uint8  = ct_imgs,
+            pet_uint8 = pet_imgs,
+            suv_max   = pet_suv_max,
+        )
 
     if not components_per_label:
         print(f"  [WARN] {npz_name}: no foreground labels found – saving empty mask.")
     else:
-        for label_id in sorted(components_per_label):          # 1 before 2
-            components = components_per_label[label_id]
+        for label_id in sorted(components_per_label):
+            comps = components_per_label[label_id]
             label_name = "GTVp" if label_id == LABEL_GTVp else "GTVn"
-            print(f"  {label_name}: {len(components)} component(s)")
+            print(f"  {label_name}: {len(comps)} component(s)")
 
-            for comp in components:
-                key_z    = comp["z_mid"]
-                bbox_2d  = comp["bbox_2d"]   # [x_min, y_min, x_max, y_max]
+            for comp in comps:
+                # ── FIXED: was comp["z_mid"] which doesn't exist ──────────
+                if bbox_mode == "gt":
+                    # GT components come from slicer; use the new helper.
+                    key_z, bbox_2d = get_z_prompt_from_component(comp)
+                else:
+                    # Auto-prompter returns z_mid / bbox_2d directly.
+                    key_z  = comp["z_mid"]
+                    bbox_2d = comp["bbox_2d"]
+
                 print(
                     f"    component {comp['component_id']}: "
                     f"key_z={key_z}, bbox={bbox_2d.tolist()}, "
@@ -335,16 +390,17 @@ def infer_one_npz(
             join(nifti_dir, npz_name.replace(".npz", "_seg.nii.gz")),
         )
 
-    # ── Optionally save overlay PNG ──────────────────────────────────────
+    # ── Optional PNG overlay ──────────────────────────────────────────────
     if overlay_dir is not None:
         os.makedirs(overlay_dir, exist_ok=True)
-        # Use GTVp key slice for the visualisation anchor
         gtvp_comps = components_per_label.get(LABEL_GTVp, [])
-        key_z_vis = gtvp_comps[0]["z_mid"] if gtvp_comps else D // 2
+        if gtvp_comps:
+            key_z_vis = (gtvp_comps[0]["z_mid"] if bbox_mode != "gt"
+                         else get_z_prompt_from_component(gtvp_comps[0])[0])
+        else:
+            key_z_vis = D // 2
         save_overlay(
-            ct_imgs,
-            segs_3d,
-            key_slice=key_z_vis,
+            ct_imgs, segs_3d, key_slice=key_z_vis,
             save_path=join(overlay_dir, npz_name.replace(".npz", "_overlay.png")),
         )
 
@@ -360,6 +416,19 @@ def infer_one_npz(
 def main(args: argparse.Namespace) -> None:
     cfg_path  = os.path.abspath(args.cfg)
     predictor = build_sam2_video_predictor_npz(cfg_path, args.checkpoint)
+
+    # ── Build auto-prompter if needed ─────────────────────────────────────
+    auto_prompter = None
+    if args.bbox_mode != "gt":
+        from auto_prompting import AutoPrompter
+        auto_prompter = AutoPrompter(
+            method         = args.bbox_mode,
+            model_path     = args.proposal_model,
+            pet_method     = args.pet_method,
+            device         = "cuda" if torch.cuda.is_available() else "cpu",
+            prob_threshold = args.prob_threshold,
+        )
+        print(f"Auto-prompter: {auto_prompter}")
 
     npz_files = sorted(glob(join(args.imgs_path, "**", "*.npz"), recursive=True))
     if not npz_files:
@@ -378,6 +447,8 @@ def main(args: argparse.Namespace) -> None:
             nifti_dir     = nifti_dir,
             overlay_dir   = overlay_dir,
             bbox_shift    = args.bbox_shift,
+            bbox_mode     = args.bbox_mode,
+            auto_prompter = auto_prompter,
         )
         timing[name] = dur
 
@@ -395,29 +466,60 @@ def main(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="MedSAM2 HECKTOR inference (GTVp + GTVn, multi-component)."
+        description="MedSAM2 HECKTOR inference (GTVp + GTVn, multi-component).",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument(
-        "--checkpoint", type=str,
-        default="/data/ethan/MedSAM2/checkpoints/MedSAM2_latest.pt",
-    )
-    parser.add_argument(
-        "--cfg", type=str,
-        default="sam2/configs/sam2.1_hiera_t512.yaml",
-    )
-    parser.add_argument(
-        "-i", "--imgs_path", type=str,
-        default="/data/ethan/MedSAM2/hecktor_npz/val",
-    )
-    parser.add_argument(
-        "-o", "--pred_save_dir", type=str,
-        default="/data/ethan/MedSAM2/predictions/val",
-    )
-    parser.add_argument(
-        "--bbox_shift", type=int, default=5,
-        help="Extra voxel margin around bounding-box prompts (default: 5).",
-    )
+    # Original arguments (unchanged)
+    parser.add_argument("--checkpoint", type=str,
+                        default="/data/ethan/MedSAM2/checkpoints/MedSAM2_latest.pt")
+    parser.add_argument("--cfg", type=str,
+                        default="sam2/configs/sam2.1_hiera_t512.yaml")
+    parser.add_argument("-i", "--imgs_path", type=str,
+                        default="/data/ethan/MedSAM2/hecktor_npz/val")
+    parser.add_argument("-o", "--pred_save_dir", type=str,
+                        default="/data/ethan/MedSAM2/predictions/val")
+    parser.add_argument("--bbox_shift", type=int, default=5,
+                        help="Padding added around GT bounding-box prompts (gt mode only).")
     parser.add_argument("--save_nifti",    action="store_true")
     parser.add_argument("--save_overlays", action="store_true")
     parser.add_argument("--num_workers",   type=int, default=1)
+
+    # ── NEW: auto-prompting arguments ─────────────────────────────────────
+    parser.add_argument(
+        "--bbox_mode",
+        type=str,
+        default="gt",
+        choices=["gt", "pet", "unet", "hybrid"],
+        help=(
+            "Bounding-box prompt source. "
+            "'gt' = ground-truth oracle (default, development only). "
+            "'pet' = PET intensity thresholding. "
+            "'unet' = Small3DUNet proposal network. "
+            "'hybrid' = PET proposals filtered by UNet overlap (recommended)."
+        ),
+    )
+    parser.add_argument(
+        "--pet_method",
+        type=str,
+        default="base41",
+        choices=["base41", "black", "daisne"],
+        help=(
+            "PET thresholding strategy (used when --bbox_mode is 'pet' or 'hybrid'). "
+            "'black' and 'daisne' require pet_suv_max to be present in the NPZ; "
+            "they fall back to 'base41' otherwise."
+        ),
+    )
+    parser.add_argument(
+        "--proposal_model",
+        type=str,
+        default=None,
+        help="Path to Small3DUNet checkpoint (.pt). Required for 'unet' and 'hybrid'.",
+    )
+    parser.add_argument(
+        "--prob_threshold",
+        type=float,
+        default=0.25,
+        help="UNet probability threshold for binary mask (recall-biased default: 0.25).",
+    )
+
     main(parser.parse_args())
