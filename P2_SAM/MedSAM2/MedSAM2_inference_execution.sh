@@ -7,12 +7,10 @@
 #
 # Runs MedSAM2 inference on HECKTOR NPZ files then evaluates DSC.
 #
-# Checkpoint   : ./checkpoints/MedSAM2_latest.pt   (from training or download)
-# NPZ input    : /data/ethan/MedSAM2/hecktor_npz/val/
-# Predictions  : /data/ethan/MedSAM2/predictions/<PRED_DIR>/
-# Evaluation   : /data/ethan/MedSAM2/predictions/<PRED_DIR>/dsc_results.csv
-#
-# Uses GT bounding boxes as prompts (oracle mode — for development / sanity check).
+# Supports three prompt modes:
+#   gt     – Ground-truth bounding boxes (oracle/development mode)
+#   pet    – PET-driven auto-proposals    (no trained model needed)
+#   hybrid – PET + UNet proposals         (best for real predictions)
 # =============================================================================
 
 set -e
@@ -37,8 +35,7 @@ NPZ_TRAIN=/data/ethan/MedSAM2/hecktor_npz/train
 CHECKPOINT=./checkpoints/MedSAM2_latest.pt
 CFG=sam2/configs/sam2.1_hiera_tiny_hecktor.yaml
 
-PRED_DIR=ethan_hecktor_hiera_tiny
-PRED_ROOT=/data/ethan/MedSAM2/predictions/$PRED_DIR
+PRED_ROOT=/data/ethan/MedSAM2/predictions
 
 mkdir -p "$PRED_ROOT"
 
@@ -53,7 +50,7 @@ echo "  GPU        : $CUDA_VISIBLE_DEVICES"
 echo "========================================"
 
 # =============================================================================
-# STEP 2A — Inference on validation set using best checkpoint  [ACTIVE]
+# STEP 2.A.1 — Inference on validation set using best checkpoint  [ACTIVE]
 #
 # --bbox_shift 5  : add a 5-voxel margin around GT bounding boxes (oracle mode)
 # --save_nifti    : write predicted masks as .nii.gz for visual QC in ITK-SNAP
@@ -64,27 +61,30 @@ CUDA_VISIBLE_DEVICES=0 python3.10 inference/infer_hecktor.py \
     --checkpoint    "$CHECKPOINT" \
     --cfg           "$CFG" \
     --imgs_path     "$NPZ_VAL" \
-    --pred_save_dir "$PRED_ROOT/val_best" \
+    --pred_save_dir "$PRED_ROOT/gt_oracle" \
+    --bbox_mode     gt \
     --bbox_shift    5 \
     --save_nifti \
     --save_overlays \
-    2>&1 | tee "$PRED_ROOT/inference_val_best.log"
+    2>&1 | tee "$PRED_ROOT/gt_oracle/inference_val.log"
 
 # =============================================================================
-# STEP 2B — Inference on training set (overfit check)  [UNCOMMENT IF NEEDED]
+# STEP 2.A.2 — Inference on training set (overfit check)  [UNCOMMENT IF NEEDED]
 # =============================================================================
 
 # CUDA_VISIBLE_DEVICES=0 python3.10 inference/infer_hecktor.py \
 #     --checkpoint    "$CHECKPOINT" \
 #     --cfg           "$CFG" \
 #     --imgs_path     "$NPZ_TRAIN" \
-#     --pred_save_dir "$PRED_ROOT/train_best" \
+#     --pred_save_dir "$PRED_ROOT/gt_oracle" \
+#     --bbox_mode     gt \
 #     --bbox_shift    5 \
+#     --save_nifti \
 #     --save_overlays \
-#     2>&1 | tee "$PRED_ROOT/inference_train_best.log"
+#     2>&1 | tee "$PRED_ROOT/gt_oracle/inference_train.log"
 
 # =============================================================================
-# STEP 2C — High-overlap inference on val (more accurate, slower)
+# STEP 2.A.3 — High-overlap inference on val (more accurate, slower)
 #           Increase --bbox_shift to 0 to use tight GT boxes for a ceiling estimate.
 #           [UNCOMMENT FOR FINAL RESULTS]
 # =============================================================================
@@ -93,12 +93,43 @@ CUDA_VISIBLE_DEVICES=0 python3.10 inference/infer_hecktor.py \
 #     --checkpoint    "$CHECKPOINT" \
 #     --cfg           "$CFG" \
 #     --imgs_path     "$NPZ_VAL" \
-#     --pred_save_dir "$PRED_ROOT/val_best_tightbox" \
+#     --pred_save_dir "$PRED_ROOT/gt_oracle" \
+#     --bbox_mode     gt \
 #     --bbox_shift    0 \
 #     --save_nifti \
 #     --save_overlays \
-#     2>&1 | tee "$PRED_ROOT/inference_val_tightbox.log"
+#     2>&1 | tee "$PRED_ROOT/gt_oracle/inference_val_tightbox.log"
 
+# =============================================================================
+# STEP 2.B.1 — PET-only auto-prompting  [UNCOMMENT TO USE]
+# Uses base41 method (41% of SUV_max); no trained model required.
+# Also try --pet_method black or --pet_method daisne (need pet_suv_max in NPZ).
+# =============================================================================
+
+# CUDA_VISIBLE_DEVICES=0 python3.10 inference/infer_hecktor.py \
+#     --checkpoint    "$CHECKPOINT" \
+#     --cfg           "$CFG" \
+#     --imgs_path     "$NPZ_VAL" \
+#     --pred_save_dir "$PRED_ROOT/pet_only" \
+#     --bbox_mode     pet \
+#     --pet_method    base41 \
+#     --save_overlays \
+#     2>&1 | tee "$PRED_ROOT/pet_only/inference_base41.log"
+
+# =============================================================================
+# STEP 2.B.2 — PET-only auto-prompting  [UNCOMMENT TO USE]
+# Uses black method; no trained model required.
+# =============================================================================
+
+# CUDA_VISIBLE_DEVICES=0 python3.10 inference/infer_hecktor.py \
+#     --checkpoint    "$CHECKPOINT" \
+#     --cfg           "$CFG" \
+#     --imgs_path     "$NPZ_VAL" \
+#     --pred_save_dir "$PRED_ROOT/pet_only" \
+#     --bbox_mode     pet \
+#     --pet_method    black \
+#     --save_overlays \
+#     2>&1 | tee "$PRED_ROOT/pet_only/inference_black.log"
 # =============================================================================
 # STEP 3 — Evaluate predicted masks against GT (DSC per patient + mean)
 #
