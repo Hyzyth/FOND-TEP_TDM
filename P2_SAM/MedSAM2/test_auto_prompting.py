@@ -231,7 +231,7 @@ def make_net_figure(patient_id: str, data: dict,
     fig.suptitle(f"Proposal network — {patient_id}", color="white", fontsize=10)
 
     for row, thr in enumerate(thresholds):
-        from auto_prompting.pet_proposals import mask_to_proposals
+        from auto_prompting.pet_proposal import mask_to_proposals
         props = mask_to_proposals(prob > thr,
                                   slice_pad=args.slice_pad,
                                   planar_pad=args.planar_pad)
