@@ -20,41 +20,44 @@ The script:
 
 Changes from the original
 --------------------------
-* Fixed ``find_components`` call: replaced the non-existent ``padding``
-  keyword with the correct ``slice_pad`` and ``planar_pad`` parameters.
-* Fixed component access: ``comp["z_mid"]`` did not exist in the updated
-  slicer.py; replaced with ``get_z_prompt_from_component(comp)``.
-* Added ``--bbox_mode`` argument (gt | pet | unet | hybrid).
-  - ``gt``     : oracle mode using ground-truth boxes (original behaviour)
-  - ``pet``    : PET-driven proposals from ``auto_prompting.pet_proposals``
-  - ``unet``   : Small3DUNet proposals from ``auto_prompting.proposal_net``
-  - ``hybrid`` : PET ∪ UNet proposals filtered by 3-D IoU (recommended)
-* Added ``--pet_method``    argument (base41 | black | daisne).
-* Added ``--proposal_model`` argument: path to Small3DUNet checkpoint.
-* Loads ``pet_suv_max`` from NPZ when available (required for black/daisne).
+BUG FIXES
+* find_components: replaced non-existent ``padding`` kwarg with the correct
+  ``slice_pad`` and ``planar_pad`` — they are now separate arguments because
+  the Z axis is measured in slices while Y/X are measured in voxels.
+  ``--bbox_shift`` controls planar padding (Y/X); ``--slice_pad`` controls
+  the axial padding (default 1).
+* comp["z_mid"]: replaced with ``get_z_prompt_from_component(comp)`` since
+  "z_mid" does not exist in the updated slicer.py.
+
+NEW FEATURES
+* ``--bbox_mode``   : gt | pet | unet | hybrid
+* ``--pet_method``  : base41 | nestle | black | daisne
+* ``--proposal_model``: path to Small3DUNet checkpoint
+* ``--slice_pad``   : axial padding in slices (default 1)
+* Rich per-patient JSON logs + ``inference_summary.csv`` in pred_save_dir
 
 Usage (GT / oracle mode – unchanged)
 -------------------------------------
 python inference/infer_hecktor.py \\
     --checkpoint ./checkpoints/MedSAM2_latest.pt \\
-    --cfg sam2/configs/sam2.1_hiera_t512.yaml \\
+    --cfg sam2/configs/sam2.1_hiera_tiny_hecktor.yaml \\
     --imgs_path /data/ethan/MedSAM2/hecktor_npz/val \\
-    --pred_save_dir /data/ethan/MedSAM2/predictions/val \\
-    --bbox_mode gt \\
-    --bbox_shift 5
+    --pred_save_dir /data/ethan/MedSAM2/predictions/gt_oracle \\
+    --bbox_mode gt --bbox_shift 5 --slice_pad 1
 
-Usage (auto-prompting – hybrid mode)
---------------------------------------
+Usage (hybrid auto-prompting)
+------------------------------
 python inference/infer_hecktor.py \\
-    --checkpoint ./checkpoints/MedSAM2_latest.pt \\
-    --cfg sam2/configs/sam2.1_hiera_t512.yaml \\
-    --imgs_path /data/ethan/MedSAM2/hecktor_npz/val \\
-    --pred_save_dir /data/ethan/MedSAM2/predictions/val_auto \\
+    ... \\
     --bbox_mode hybrid \\
-    --proposal_model ./auto_prompting/checkpoints/proposal_net_best.pt
+    --pet_method base41 \\
+    --proposal_model /data/ethan/MedSAM2/proposal_net/checkpoints/proposal_net_best.pt \\
+    --prob_threshold 0.25
 """
 
 import argparse
+import json
+import csv
 import os
 import sys
 import time
@@ -104,38 +107,37 @@ def fuse_ct_pet_to_tensor(
     pet_imgs: np.ndarray,
     target_size: int = MODEL_IMG_SIZE,
 ) -> torch.Tensor:
-    """Convert (D, H, W) uint8 CT and PET arrays to a (D, 3, S, S) tensor.
+    """Convert (D,H,W) uint8 CT and PET arrays to a normalized tensor.
 
-    Channel layout mirrors training: [CT, PET, PET].
+    Output shape:
+        (D, 3, S, S)
 
-    Parameters
-    ----------
-    ct_imgs, pet_imgs : (D, H, W) uint8 in [0, 255]
-    target_size : int  square spatial size
-
-    Returns
-    -------
-    torch.Tensor  (D, 3, target_size, target_size) float32, ImageNet-normalised
+    Channel layout:
+        [CT, PET, PET]
     """
     D = ct_imgs.shape[0]
-    out = np.zeros((D, 3, target_size, target_size), dtype=np.float32)
+    out = np.empty((D, 3, target_size, target_size), dtype=np.float32)
 
     for i in range(D):
-        ct_pil  = Image.fromarray(ct_imgs[i]).convert("RGB").resize(
-            (target_size, target_size)
-        )
-        pet_pil = Image.fromarray(pet_imgs[i]).convert("RGB").resize(
-            (target_size, target_size)
-        )
-        ct_arr  = np.array(ct_pil,  dtype=np.float32) / 255.0
-        pet_arr = np.array(pet_pil, dtype=np.float32) / 255.0
-        out[i, 0] = ct_arr[:, :, 0]   # CT channel
-        out[i, 1] = pet_arr[:, :, 0]  # PET channel
-        out[i, 2] = pet_arr[:, :, 0]  # PET repeated
+        ct = np.array(
+            Image.fromarray(ct_imgs[i]).resize((target_size, target_size)),
+            dtype=np.float32,
+        ) / 255.0
+
+        pet = np.array(
+            Image.fromarray(pet_imgs[i]).resize((target_size, target_size)),
+            dtype=np.float32,
+        ) / 255.0
+
+        out[i, 0] = ct
+        out[i, 1] = pet
+        out[i, 2] = pet
 
     tensor = torch.from_numpy(out)
+
     mean = torch.tensor(IMG_MEAN, dtype=torch.float32)[:, None, None]
-    std  = torch.tensor(IMG_STD,  dtype=torch.float32)[:, None, None]
+    std = torch.tensor(IMG_STD, dtype=torch.float32)[:, None, None]
+
     return (tensor - mean) / std
 
 
@@ -229,31 +231,23 @@ def propagate_one_component(
         segs_3d[frame_idx][writeable] = label_id
 
     with torch.autocast("cuda", dtype=torch.bfloat16):
-        # ── Forward propagation (key_z → last slice) ───────────────────
-        state = predictor.init_state(img_tensor, video_h, video_w)
-        predictor.add_new_points_or_box(
-            inference_state=state,
-            frame_idx=key_z,
-            obj_id=1,
-            box=bbox_model,
-        )
-        for out_frame, _, out_logits in predictor.propagate_in_video(state):
-            _write(out_frame, out_logits)
-        predictor.reset_state(state)
+        for reverse in (False, True):  # forward, reverse
+            state = predictor.init_state(img_tensor, video_h, video_w)
 
-        # ── Reverse propagation (key_z → first slice) ──────────────────
-        state = predictor.init_state(img_tensor, video_h, video_w)
-        predictor.add_new_points_or_box(
-            inference_state=state,
-            frame_idx=key_z,
-            obj_id=1,
-            box=bbox_model,
-        )
-        for out_frame, _, out_logits in predictor.propagate_in_video(
-            state, reverse=True
-        ):
-            _write(out_frame, out_logits)
-        predictor.reset_state(state)
+            predictor.add_new_points_or_box(
+                inference_state=state,
+                frame_idx=key_z,
+                obj_id=1,
+                box=bbox_model,
+            )
+
+            for frame_idx, _, logits in predictor.propagate_in_video(
+                state,
+                reverse=reverse,
+            ):
+                _write(frame_idx, logits)
+
+            predictor.reset_state(state)
 
 
 # ---------------------------------------------------------------------------
@@ -265,33 +259,70 @@ def infer_one_npz(
     npz_path: str,
     predictor,
     pred_save_dir: str,
-    nifti_dir,
-    overlay_dir,
-    bbox_shift: int = 0,
+    nifti_dir: str | None,
+    overlay_dir: str | None,
+    log_dir: str | None,
+    bbox_shift: int = 5,
+    slice_pad: int = 1,
     bbox_mode: str = "gt",
     auto_prompter=None,
-) -> tuple[str, float]:
-    """Run MedSAM2 inference on one HECKTOR NPZ file and save results.
+) -> tuple[str, float, dict[str, int]]:
+    """Run MedSAM2 inference on a single HECKTOR NPZ volume.
 
     Parameters
     ----------
-    npz_path      : str   path to input NPZ
-    predictor     : SAM2VideoPredictorNPZ
-    pred_save_dir : str   directory for output NPZ
-    nifti_dir     : str or None  optional NIfTI output directory
-    overlay_dir   : str or None  optional PNG overlay directory
-    bbox_shift    : int   extra margin (pixels) added around bounding-box prompts
-    bbox_mode     : 'gt' uses ground-truth boxes (oracle).
-                   'pet' / 'unet' / 'hybrid' use auto_prompter.
-    auto_prompter : AutoPrompter instance (required when bbox_mode != 'gt')
+    npz_path : str
+        Path to input NPZ file.
+
+    predictor :
+        SAM2 video predictor instance.
+
+    pred_save_dir : str
+        Directory where compressed segmentation NPZ files are saved.
+
+    nifti_dir : str | None
+        Optional output directory for NIfTI segmentations.
+
+    overlay_dir : str | None
+        Optional output directory for PNG overlay visualizations.
+
+    log_dir : str | None
+        Optional output directory for per-patient JSON logs.
+
+    bbox_shift : int
+        In-plane (Y/X) padding added around GT bounding boxes in voxels.
+
+    slice_pad : int
+        Axial (Z) padding added around GT components in slices.
+
+    bbox_mode : str
+        Bounding-box prompting mode:
+            - "gt"     : oracle GT boxes
+            - "pet"    : PET threshold proposals
+            - "unet"   : proposal network
+            - "hybrid" : combined PET + proposal model
+
+    auto_prompter :
+        AutoPrompter instance. Required when bbox_mode != "gt".
 
     Returns
     -------
-    (basename, duration_seconds)
+    tuple[str, float, dict[str, int]]
+        (
+            patient_id,
+            inference_duration_seconds,
+            {
+                "gtvp": int,
+                "gtvn": int,
+            }
+        )
     """
+
     t0 = time.time()
     npz_name = basename(npz_path)
-    print(f"\n▶ {npz_name}")
+    patient_id = npz_name.replace(".npz", "")
+
+    print(f"\n▶ {patient_id}")
 
     # ── Load ────────────────────────────────────────────────────────────
     data     = np.load(npz_path, allow_pickle=True)
@@ -300,35 +331,54 @@ def infer_one_npz(
     gts      = data["gts"]       # (D, H, W) uint8  labels 0/1/2
     spacing  = data["spacing"]   # (3,) float64
 
-    # pet_suv_max is saved by the updated prepare_hecktor_npz.py.
-    # Old NPZ files won't have it; fall back to None gracefully.
-    pet_suv_max = float(data["pet_suv_max"]) if "pet_suv_max" in data else None
+    # ──────────────────────────────────────────────────────────────────
+    # Load NPZ
+    # ──────────────────────────────────────────────────────────────────
+    data = np.load(npz_path, allow_pickle=True)
+
+    ct_imgs = data["ct_imgs"]       # (D, H, W) uint8
+    pet_imgs = data["pet_imgs"]     # (D, H, W) uint8
+    gts = data["gts"]               # (D, H, W) uint8
+    spacing = data["spacing"]       # (3,) float64
+
+    # Optional field in newer NPZs
+    pet_suv_max = (
+        float(data["pet_suv_max"])
+        if "pet_suv_max" in data
+        else None
+    )
+
     if pet_suv_max is None and bbox_mode in ("pet", "hybrid"):
-        print(f"  [WARN] pet_suv_max not found in {npz_name}. "
-              "Black/Daisne methods will fall back to base41.")
+        print(
+            "  [WARN] pet_suv_max missing. "
+            "Black/Daisne/Nestle methods will fall back to base41."
+        )
 
     D, H, W = ct_imgs.shape
-    segs_3d  = np.zeros((D, H, W), dtype=np.uint8)
 
-    # ── Build model input tensor ─────────────────────────────────────────
-    img_tensor = fuse_ct_pet_to_tensor(ct_imgs, pet_imgs, MODEL_IMG_SIZE).cuda()
+    segs_3d = np.zeros((D, H, W), dtype=np.uint8)
     orig_hw = (H, W)
 
-    # ── Get bounding-box prompts ──────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────
+    # Build model input tensor
+    # ──────────────────────────────────────────────────────────────────
+    img_tensor = fuse_ct_pet_to_tensor(ct_imgs, pet_imgs, MODEL_IMG_SIZE).cuda()
+
+    # ──────────────────────────────────────────────────────────────────
+    # Get prompting components
+    # ──────────────────────────────────────────────────────────────────
     if bbox_mode == "gt":
-        # --- FIXED: was `padding=bbox_shift` (TypeError) ---
         components_per_label = find_components(
-            mask       = gts,
-            slice_pad  = bbox_shift,    # ← corrected parameter name
-            planar_pad = bbox_shift,    # ← corrected parameter name
-            label_values = (LABEL_GTVp, LABEL_GTVn),
+            mask=gts,
+            slice_pad=slice_pad,
+            planar_pad=bbox_shift,
+            label_values=(LABEL_GTVp, LABEL_GTVn),
         )
     else:
-        # Auto-prompting mode
         if auto_prompter is None:
             raise RuntimeError(
-                f"bbox_mode='{bbox_mode}' requires an AutoPrompter instance. "
-                "Pass --proposal_model or use --bbox_mode gt."
+                f"bbox_mode='{bbox_mode}' requires an AutoPrompter "
+                "instance. Provide --proposal_model or use --bbox_mode gt."
             )
         components_per_label = auto_prompter.get_proposals(
             ct_uint8  = ct_imgs,
@@ -336,40 +386,55 @@ def infer_one_npz(
             suv_max   = pet_suv_max,
         )
 
+    # ──────────────────────────────────────────────────────────────────
+    # Propagation
+    # ──────────────────────────────────────────────────────────────────
+    n_gtvp = 0
+    n_gtvn = 0
+
     if not components_per_label:
-        print(f"  [WARN] {npz_name}: no foreground labels found – saving empty mask.")
+        print("  [WARN] No foreground components found, saving empty mask.")
     else:
         for label_id in sorted(components_per_label):
-            comps = components_per_label[label_id]
+            components = components_per_label[label_id]
             label_name = "GTVp" if label_id == LABEL_GTVp else "GTVn"
-            print(f"  {label_name}: {len(comps)} component(s)")
 
-            for comp in comps:
-                # ── FIXED: was comp["z_mid"] which doesn't exist ──────────
+            print(f"  {label_name}: {len(components)} component(s)")
+
+            if label_id == LABEL_GTVp:
+                n_gtvp = len(components)
+            else:
+                n_gtvn = len(components)
+
+            for component in components:
+            # GT slicer output and auto-prompter output use
+                # slightly different schemas.
                 if bbox_mode == "gt":
-                    # GT components come from slicer; use the new helper.
-                    key_z, bbox_2d = get_z_prompt_from_component(comp)
+                    key_z, bbox_2d = get_z_prompt_from_component(component)
                 else:
-                    # Auto-prompter returns z_mid / bbox_2d directly.
-                    key_z  = comp["z_mid"]
-                    bbox_2d = comp["bbox_2d"]
+                    key_z = component["z_mid"]
+                    bbox_2d = component["bbox_2d"]
 
                 print(
-                    f"    component {comp['component_id']}: "
-                    f"key_z={key_z}, bbox={bbox_2d.tolist()}, "
-                    f"voxels={comp['voxel_count']}"
+                    f"    component={component['component_id']}  "
+                    f"key_z={key_z}  "
+                    f"bbox={bbox_2d.tolist()}  "
+                    f"voxels={component['voxel_count']}"
                 )
+
                 propagate_one_component(
-                    predictor = predictor,
-                    img_tensor= img_tensor,
-                    video_h   = H,
-                    video_w   = W,
-                    key_z     = key_z,
-                    bbox_orig = bbox_2d,
-                    orig_hw   = orig_hw,
-                    label_id  = label_id,
-                    segs_3d   = segs_3d,
+                    predictor=predictor,
+                    img_tensor=img_tensor,
+                    video_h=H,
+                    video_w=W,
+                    key_z=key_z,
+                    bbox_orig=bbox_2d,
+                    orig_hw=orig_hw,
+                    label_id=label_id,
+                    segs_3d=segs_3d,
                 )
+
+    duration = time.time() - t0
 
     # ── Save output NPZ ─────────────────────────────────────────────────
     os.makedirs(pred_save_dir, exist_ok=True)
@@ -383,7 +448,7 @@ def infer_one_npz(
     if nifti_dir is not None:
         os.makedirs(nifti_dir, exist_ok=True)
         sitk_seg = sitk.GetImageFromArray(segs_3d)
-        # spacing stored as (z, y, x); SimpleITK expects (x, y, z)
+        # Stored as (z, y, x); SimpleITK expects (x, y, z)
         sitk_seg.SetSpacing([float(spacing[2]), float(spacing[1]), float(spacing[0])])
         sitk.WriteImage(
             sitk_seg,
@@ -395,8 +460,10 @@ def infer_one_npz(
         os.makedirs(overlay_dir, exist_ok=True)
         gtvp_comps = components_per_label.get(LABEL_GTVp, [])
         if gtvp_comps:
-            key_z_vis = (gtvp_comps[0]["z_mid"] if bbox_mode != "gt"
-                         else get_z_prompt_from_component(gtvp_comps[0])[0])
+            if bbox_mode == "gt":
+                key_z_vis = get_z_prompt_from_component(gtvp_comps[0])[0]
+            else:
+                key_z_vis = gtvp_comps[0]["z_mid"]
         else:
             key_z_vis = D // 2
         save_overlay(
@@ -404,9 +471,33 @@ def infer_one_npz(
             save_path=join(overlay_dir, npz_name.replace(".npz", "_overlay.png")),
         )
 
-    duration = time.time() - t0
+    # ──────────────────────────────────────────────────────────────────
+    # Optional JSON logging
+    # ──────────────────────────────────────────────────────────────────
+    if log_dir is not None:
+        os.makedirs(log_dir, exist_ok=True)
+
+        log_entry = {
+            "patient_id": patient_id,
+            "bbox_mode": bbox_mode,
+            "pet_method": getattr(auto_prompter, "pet_method", "n/a"),
+            "prob_threshold": getattr(auto_prompter, "prob_threshold", "n/a"),
+            "slice_pad": slice_pad,
+            "planar_pad_vox": bbox_shift,
+            "pet_suv_max": pet_suv_max,
+            "volume_shape_dhw": list(ct_imgs.shape),
+            "gtvp_components": n_gtvp,
+            "gtvn_components": n_gtvn,
+            "proposals_total": n_gtvp + n_gtvn,
+            "duration_seconds": round(duration, 2),
+        }
+
+        with open(join(log_dir, f"{patient_id}.json"), "w") as f:
+            json.dump(log_entry, f, indent=2)
+
     print(f"  Done in {duration:.1f}s")
-    return npz_name, duration
+
+    return (patient_id, duration, {"gtvp": n_gtvp, "gtvn": n_gtvn})
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +518,8 @@ def main(args: argparse.Namespace) -> None:
             pet_method     = args.pet_method,
             device         = "cuda" if torch.cuda.is_available() else "cpu",
             prob_threshold = args.prob_threshold,
+            slice_pad      = args.slice_pad,
+            planar_pad     = args.bbox_shift,
         )
         print(f"Auto-prompter: {auto_prompter}")
 
@@ -437,89 +530,93 @@ def main(args: argparse.Namespace) -> None:
 
     nifti_dir   = join(args.pred_save_dir, "nifti")    if args.save_nifti    else None
     overlay_dir = join(args.pred_save_dir, "overlays") if args.save_overlays else None
+    log_dir     = join(args.pred_save_dir, "logs")
 
     timing: OrderedDict = OrderedDict()
+    summary = []
+
     for npz_path in tqdm(npz_files, desc="inference"):
-        name, dur = infer_one_npz(
+        patient, dur, counts = infer_one_npz(
             npz_path      = npz_path,
             predictor     = predictor,
             pred_save_dir = args.pred_save_dir,
             nifti_dir     = nifti_dir,
             overlay_dir   = overlay_dir,
+            log_dir       = log_dir,
             bbox_shift    = args.bbox_shift,
+            slice_pad     = args.slice_pad,
             bbox_mode     = args.bbox_mode,
             auto_prompter = auto_prompter,
         )
-        timing[name] = dur
+        timing[patient] = dur
+        summary.append({
+            "patient":    patient,
+            "duration_s": f"{dur:.2f}",
+            "n_gtvp":     counts["gtvp"],
+            "n_gtvn":     counts["gtvn"],
+        })
 
-    import csv
-    csv_path = join(args.pred_save_dir, "inference_timing.csv")
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["patient", "duration_s"])
-        for name, dur in timing.items():
-            writer.writerow([name, f"{dur:.2f}"])
+    # ── Timing CSV ────────────────────────────────────────────────────────
+    timing_csv = join(args.pred_save_dir, "inference_timing.csv")
+    with open(timing_csv, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["patient", "duration_s"])
+        for n, d in timing.items():
+            w.writerow([n, f"{d:.2f}"])
+
+    # ── Summary CSV (timing + component counts + run config) ─────────────
+    summary_csv = join(args.pred_save_dir, "inference_summary.csv")
+    with open(summary_csv, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=[
+            "patient", "duration_s", "n_gtvp", "n_gtvn",
+        ])
+        w.writeheader()
+        w.writerows(summary)
+
+    # ── Run config JSON (for easy result reproducibility) ────────────────
+    config_json = join(args.pred_save_dir, "run_config.json")
+    with open(config_json, "w") as f:
+        json.dump(vars(args), f, indent=2)
 
     total = sum(timing.values())
-    print(f"\nAll done.  Total: {total:.1f}s  |  CSV: {csv_path}")
+    print(f"\nAll done.  Total: {total:.1f}s  ({total/len(npz_files):.1f}s/patient)")
+    print(f"Summary CSV  : {summary_csv}")
+    print(f"Per-patient  : {log_dir}/")
+    print(f"Run config   : {config_json}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
+    p = argparse.ArgumentParser(
         description="MedSAM2 HECKTOR inference (GTVp + GTVn, multi-component).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    # Original arguments (unchanged)
-    parser.add_argument("--checkpoint", type=str,
-                        default="/data/ethan/MedSAM2/checkpoints/MedSAM2_latest.pt")
-    parser.add_argument("--cfg", type=str,
-                        default="sam2/configs/sam2.1_hiera_t512.yaml")
-    parser.add_argument("-i", "--imgs_path", type=str,
-                        default="/data/ethan/MedSAM2/hecktor_npz/val")
-    parser.add_argument("-o", "--pred_save_dir", type=str,
-                        default="/data/ethan/MedSAM2/predictions/val")
-    parser.add_argument("--bbox_shift", type=int, default=5,
-                        help="Padding added around GT bounding-box prompts (gt mode only).")
-    parser.add_argument("--save_nifti",    action="store_true")
-    parser.add_argument("--save_overlays", action="store_true")
-    parser.add_argument("--num_workers",   type=int, default=1)
+    # ── Original arguments ────────────────────────────────────────────────
+    p.add_argument("--checkpoint", default="/data/ethan/MedSAM2/checkpoints/MedSAM2_latest.pt")
+    p.add_argument("--cfg", default="sam2/configs/sam2.1_hiera_tiny_hecktor.yaml")
+    p.add_argument("-i", "--imgs_path", default="/data/ethan/MedSAM2/hecktor_npz/val")
+    p.add_argument("-o", "--pred_save_dir", default="/data/ethan/MedSAM2/predictions/val")
+    p.add_argument("--bbox_shift", type=int, default=5,
+                   help="Planar (Y/X) bounding-box padding in voxels.")
+    p.add_argument("--save_nifti",    action="store_true")
+    p.add_argument("--save_overlays", action="store_true")
+    p.add_argument("--num_workers",   type=int, default=1)
 
-    # ── NEW: auto-prompting arguments ─────────────────────────────────────
-    parser.add_argument(
-        "--bbox_mode",
-        type=str,
-        default="gt",
-        choices=["gt", "pet", "unet", "hybrid"],
-        help=(
-            "Bounding-box prompt source. "
-            "'gt' = ground-truth oracle (default, development only). "
-            "'pet' = PET intensity thresholding. "
-            "'unet' = Small3DUNet proposal network. "
-            "'hybrid' = PET proposals filtered by UNet overlap (recommended)."
-        ),
-    )
-    parser.add_argument(
-        "--pet_method",
-        type=str,
-        default="base41",
-        choices=["base41", "black", "daisne"],
-        help=(
-            "PET thresholding strategy (used when --bbox_mode is 'pet' or 'hybrid'). "
-            "'black' and 'daisne' require pet_suv_max to be present in the NPZ; "
-            "they fall back to 'base41' otherwise."
-        ),
-    )
-    parser.add_argument(
-        "--proposal_model",
-        type=str,
-        default=None,
-        help="Path to Small3DUNet checkpoint (.pt). Required for 'unet' and 'hybrid'.",
-    )
-    parser.add_argument(
-        "--prob_threshold",
-        type=float,
-        default=0.25,
-        help="UNet probability threshold for binary mask (recall-biased default: 0.25).",
-    )
+    # ── NEW: separate axial padding ───────────────────────────────────────
+    p.add_argument("--slice_pad", type=int, default=1,
+                   help="Axial (Z) bounding-box padding in slices. "
+                        "Kept small (default 1) because one Z slice = one video frame.")
 
-    main(parser.parse_args())
+    # ── NEW: auto-prompting ───────────────────────────────────────────────
+    p.add_argument("--bbox_mode", default="gt",
+                   choices=["gt", "pet", "unet", "hybrid"],
+                   help="Prompt source. 'gt'=oracle (dev only), others=auto.")
+    p.add_argument("--pet_method", default="base41",
+                   choices=["base41", "nestle", "black", "daisne"],
+                   help="PET thresholding strategy for 'pet'/'hybrid' modes.")
+    p.add_argument("--proposal_model", default=None,
+                   help="Path to Small3DUNet .pt checkpoint "
+                        "(required for 'unet'/'hybrid').")
+    p.add_argument("--prob_threshold", type=float, default=0.25,
+                   help="UNet probability threshold (recall-biased default 0.25).")
+
+    main(p.parse_args())
