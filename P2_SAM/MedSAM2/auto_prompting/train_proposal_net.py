@@ -3,26 +3,35 @@ auto_prompting/train_proposal_net.py
 =====================================
 Train the Small3DUNet proposal network on HECKTOR NPZ data.
 
-Objective: high-recall coarse tumour mask.  The network is intentionally small
-to avoid overfitting on the limited HECKTOR dataset (~500 patients).
+Objective: high-recall coarse tumour mask — used as the 'unet' and 'hybrid'
+proposal modes in infer_hecktor.py, not as a final segmentation model.
+
+Losses and metrics are specific to the recall-biased proposal objective and
+are NOT duplicates of training/loss_fns.py (which contains
+MultiStepMultiMasksAndIous for the full SAM2 training pipeline).
+
+AverageMeter is imported from training.utils.train_utils to avoid duplication.
+
+Checkpoints are saved under /data/ethan/MedSAM2/proposal_net/checkpoints/ by
+default, matching the rest of the project's data layout.
 
 Usage
 -----
 python -m auto_prompting.train_proposal_net \\
     --train_dir /data/ethan/MedSAM2/hecktor_npz/train \\
     --val_dir   /data/ethan/MedSAM2/hecktor_npz/val \\
-    --output_dir ./auto_prompting/checkpoints \\
-    --num_epochs 40 \\
-    --lr 1e-3 \\
-    --crop_size 64,128,128
+    --num_epochs 40
 
-The best checkpoint (highest val recall) is saved as ``proposal_net_best.pt``
-alongside a ``proposal_net_last.pt`` at the end of training.
+The best checkpoint (highest val recall) is saved as
+    /data/ethan/MedSAM2/proposal_net/checkpoints/proposal_net_best.pt
+Training metrics are written to
+    /data/ethan/MedSAM2/proposal_net/training_log.csv
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import glob
 import logging
 import os
@@ -36,14 +45,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
-# Make auto_prompting importable when run as __main__
-_HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(_HERE))
+# Ensure the repo root (containing training/) is importable
+_HERE     = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(_HERE)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+# Reuse AverageMeter from the project — avoids duplication
+from training.utils.train_utils import AverageMeter
 
 from auto_prompting.proposal_net import Small3DUNet, count_parameters
 
 logging.basicConfig(
-    format="%(asctime)s %(levelname)s %(message)s",
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
     datefmt="%H:%M:%S",
     level=logging.INFO,
 )
@@ -57,22 +71,29 @@ logger = logging.getLogger(__name__)
 class HECKTORProposalDataset(Dataset):
     """Loads HECKTOR NPZ files and provides random 3-D crops for training.
 
-    Input tensor  : (2, D, H, W) float [0, 1] – channels [CT, PET]
-    Target tensor : (1, D, H, W) float [0, 1] – binary tumour mask (gts > 0)
+    Note: This dataset is intentionally separate from HECKTORNPZRawDataset
+    (training/dataset/hecktor_dataset.py).  That class produces VOS-format
+    VideoDatapoints for the full SAM2 training pipeline.  This class returns
+    simple (input_tensor, target_tensor) pairs for the lightweight U-Net.
+
+    Augmentation operates directly on numpy arrays, unlike the PIL/tensor
+    transforms in training/dataset/transforms.py which expect VideoDatapoints.
+
+    Input  : (2, D, H, W) float32 [0, 1]  — channels [CT, PET]
+    Target : (1, D, H, W) float32 {0, 1}  — binary tumour mask (gts > 0)
     """
 
     def __init__(self,
                  npz_dir: str,
                  crop_size: tuple[int, int, int] | None = (64, 128, 128),
-                 augment: bool = True,
-                 require_foreground: bool = True) -> None:
-        self.files = sorted(glob.glob(os.path.join(npz_dir, "**", "*.npz"),
-                                      recursive=True))
+                 augment: bool = True) -> None:
+        self.files = sorted(glob.glob(
+            os.path.join(npz_dir, "**", "*.npz"), recursive=True
+        ))
         if not self.files:
             raise FileNotFoundError(f"No NPZ files found under {npz_dir}")
         self.crop_size = crop_size
-        self.augment = augment
-        self.require_foreground = require_foreground
+        self.augment   = augment
         logger.info("Dataset: %d patients in %s", len(self.files), npz_dir)
 
     def __len__(self) -> int:
@@ -80,43 +101,39 @@ class HECKTORProposalDataset(Dataset):
 
     def __getitem__(self, idx: int):
         data = np.load(self.files[idx], allow_pickle=True)
-        ct  = data["ct_imgs"].astype(np.float32) / 255.0   # (D, H, W)
-        pet = data["pet_imgs"].astype(np.float32) / 255.0  # (D, H, W)
-        gts = (data["gts"] > 0).astype(np.float32)         # (D, H, W) binary
+        ct  = data["ct_imgs"].astype(np.float32)  / 255.0
+        pet = data["pet_imgs"].astype(np.float32) / 255.0
+        gts = (data["gts"] > 0).astype(np.float32)
 
-        x = np.stack([ct, pet], axis=0)   # (2, D, H, W)
-        y = gts[np.newaxis]               # (1, D, H, W)
+        x = np.stack([ct, pet], axis=0)  # (2, D, H, W)
+        y = gts[np.newaxis]              # (1, D, H, W)
 
         if self.crop_size is not None:
             x, y = self._crop(x, y)
-
         if self.augment:
             x, y = self._augment(x, y)
 
         return torch.from_numpy(x), torch.from_numpy(y)
 
-    # ── Cropping ─────────────────────────────────────────────────────────────
-
-    def _crop(self, x: np.ndarray, y: np.ndarray):
+    def _crop(self, x, y):
         cd, ch, cw = self.crop_size
         _, D, H, W = x.shape
-
-        # Pad if volume is smaller than crop in any dimension
-        pad = [(0, 0),
-               (0, max(0, cd - D)),
-               (0, max(0, ch - H)),
-               (0, max(0, cw - W))]
-        if any(p[1] > 0 for p in pad):
-            x = np.pad(x, pad, mode="constant")
-            y = np.pad(y, pad, mode="constant")
+        # Pad if necessary
+        pd = max(0, cd - D); ph = max(0, ch - H); pw = max(0, cw - W)
+        if pd > 0 or ph > 0 or pw > 0:
+            x = np.pad(x, [(0,0),(0,pd),(0,ph),(0,pw)])
+            y = np.pad(y, [(0,0),(0,pd),(0,ph),(0,pw)])
         _, D, H, W = x.shape
 
-        if self.require_foreground and y.sum() > 0:
-            # Centre crop on the foreground ± random jitter
+        # Bias crop towards foreground
+        if y.sum() > 0:
             zs, ys, xs = np.where(y[0] > 0)
-            cz = int(np.clip(zs.mean() + np.random.randint(-cd // 4, cd // 4 + 1), 0, D))
-            cy = int(np.clip(ys.mean() + np.random.randint(-ch // 4, ch // 4 + 1), 0, H))
-            cx = int(np.clip(xs.mean() + np.random.randint(-cw // 4, cw // 4 + 1), 0, W))
+            def jittered_centre(mean_v, size, limit):
+                jitter = random.randint(-size // 4, size // 4)
+                return int(np.clip(mean_v + jitter, 0, limit))
+            cz = jittered_centre(zs.mean(), cd, D)
+            cy = jittered_centre(ys.mean(), ch, H)
+            cx = jittered_centre(xs.mean(), cw, W)
             z0 = int(np.clip(cz - cd // 2, 0, D - cd))
             y0 = int(np.clip(cy - ch // 2, 0, H - ch))
             x0 = int(np.clip(cx - cw // 2, 0, W - cw))
@@ -128,15 +145,11 @@ class HECKTORProposalDataset(Dataset):
         return (x[:, z0:z0+cd, y0:y0+ch, x0:x0+cw],
                 y[:, z0:z0+cd, y0:y0+ch, x0:x0+cw])
 
-    # ── Augmentation ─────────────────────────────────────────────────────────
-
-    def _augment(self, x: np.ndarray, y: np.ndarray):
-        # Random flips along each axis
+    def _augment(self, x, y):
         for axis in [1, 2, 3]:
             if random.random() < 0.5:
                 x = np.flip(x, axis=axis).copy()
                 y = np.flip(y, axis=axis).copy()
-        # Mild intensity jitter on CT and PET independently
         for ch in range(x.shape[0]):
             x[ch] = np.clip(x[ch] + np.random.normal(0, 0.02), 0, 1)
         return x, y
@@ -172,45 +185,25 @@ def compute_metrics(model: nn.Module,
                     loader: DataLoader,
                     device: str,
                     threshold: float = 0.25) -> dict[str, float]:
-    """Compute mean recall, precision, and Dice on a validation set."""
+    """Compute recall, precision, and Dice on a loader."""
     recalls, precisions, dices = [], [], []
     model.eval()
 
     for x, y in loader:
         x, y = x.to(device), y.to(device)
-        prob = model(x)
-        pred = (prob > threshold).float()
-        target = y
-
-        tp = (pred * target).sum().item()
-        fp = (pred * (1 - target)).sum().item()
-        fn = ((1 - pred) * target).sum().item()
-
-        rec  = tp / (tp + fn + 1e-6)
-        prec = tp / (tp + fp + 1e-6)
-        dice = 2 * tp / (2 * tp + fp + fn + 1e-6)
-
-        recalls.append(rec)
-        precisions.append(prec)
-        dices.append(dice)
+        pred = (model(x) > threshold).float()
+        tp = (pred * y).sum().item()
+        fp = (pred * (1 - y)).sum().item()
+        fn = ((1 - pred) * y).sum().item()
+        recalls.append(tp / (tp + fn + 1e-6))
+        precisions.append(tp / (tp + fp + 1e-6))
+        dices.append(2 * tp / (2 * tp + fp + fn + 1e-6))
 
     return {
         "recall":    float(np.mean(recalls)),
         "precision": float(np.mean(precisions)),
         "dice":      float(np.mean(dices)),
     }
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Soft targets (optional distance-transform weighting)
-# ──────────────────────────────────────────────────────────────────────────────
-
-def make_soft_target(gt_np: np.ndarray, sigma: float = 3.0) -> np.ndarray:
-    """Gaussian-blurred distance target to handle class imbalance."""
-    from scipy.ndimage import distance_transform_edt
-    tumor = (gt_np > 0).astype(np.float32)
-    dist  = distance_transform_edt(1 - tumor)
-    return np.exp(-(dist ** 2) / (2 * sigma ** 2))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -223,41 +216,48 @@ def train(args: argparse.Namespace) -> None:
     torch.manual_seed(args.seed)
 
     os.makedirs(args.output_dir, exist_ok=True)
+    log_csv = os.path.join(args.output_dir, "training_log.csv")
 
-    crop_size = tuple(int(v) for v in args.crop_size.split(",")) if args.crop_size else None
+    logger.info("=" * 56)
+    logger.info("  Small3DUNet Proposal Network — Training")
+    logger.info("=" * 56)
+    logger.info("  Device       : %s", args.device)
+    logger.info("  Train dir    : %s", args.train_dir)
+    logger.info("  Val dir      : %s", args.val_dir or args.train_dir)
+    logger.info("  Output dir   : %s", args.output_dir)
+    logger.info("  Crop size    : %s", args.crop_size or "full volume")
+    logger.info("  Epochs       : %d", args.num_epochs)
+    logger.info("  Batch size   : %d", args.batch_size)
+    logger.info("  LR           : %.2e  (cosine → %.2e)", args.lr, args.lr / 20)
+    logger.info("  Loss weights : BCE=%.2f  Recall=%.2f",
+                args.bce_weight, 1.0 - args.bce_weight)
+    logger.info("  Val every    : %d epochs", args.val_every)
+    logger.info("  Threshold    : %.2f (for metrics)", args.threshold)
+    logger.info("=" * 56)
 
-    # ── Datasets & loaders ───────────────────────────────────────────────────
-    train_ds = HECKTORProposalDataset(
-        args.train_dir, crop_size=crop_size, augment=True
-    )
-    val_dir  = args.val_dir or args.train_dir   # fallback: re-use train for quick sanity
-    val_ds   = HECKTORProposalDataset(
-        val_dir, crop_size=crop_size, augment=False
-    )
+    crop_size = (tuple(int(v) for v in args.crop_size.split(","))
+                 if args.crop_size else None)
 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=True,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=1,
-        shuffle=False,
-        num_workers=args.num_workers,
-    )
+    # ── Datasets ─────────────────────────────────────────────────────────
+    train_ds = HECKTORProposalDataset(args.train_dir, crop_size, augment=True)
+    val_dir  = args.val_dir or args.train_dir
+    val_ds   = HECKTORProposalDataset(val_dir,  crop_size, augment=False)
 
-    # ── Model ────────────────────────────────────────────────────────────────
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size,
+                              shuffle=True,  num_workers=args.num_workers,
+                              pin_memory=True)
+    val_loader   = DataLoader(val_ds,   batch_size=1,
+                              shuffle=False, num_workers=args.num_workers)
+
+    # ── Model ─────────────────────────────────────────────────────────────
     device = args.device
-    model = Small3DUNet(
-        in_channels=2,
-        base=args.base_features,
-        dropout=args.dropout,
-    ).to(device)
-    logger.info("Model parameters: %d (%.2f M)",
+    model  = Small3DUNet(in_channels=2,
+                         base=args.base_features,
+                         dropout=args.dropout).to(device)
+    logger.info("Small3DUNet  params: %d  (%.2fM)",
                 count_parameters(model), count_parameters(model) / 1e6)
+    logger.info("  in_channels=%d  base=%d  dropout=%.2f",
+                args.base_features, args.base_features, args.dropout)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
                                   weight_decay=args.weight_decay)
@@ -269,69 +269,87 @@ def train(args: argparse.Namespace) -> None:
     best_path   = os.path.join(args.output_dir, "proposal_net_best.pt")
     last_path   = os.path.join(args.output_dir, "proposal_net_last.pt")
 
-    # ── Epoch loop ───────────────────────────────────────────────────────────
+    # ── CSV header ────────────────────────────────────────────────────────
+    with open(log_csv, "w", newline="") as f:
+        csv.writer(f).writerow(
+            ["epoch", "train_loss", "val_recall", "val_precision",
+             "val_dice", "lr", "duration_s", "is_best"]
+        )
+
+    # ── Epoch loop ────────────────────────────────────────────────────────
     for epoch in range(1, args.num_epochs + 1):
         model.train()
-        t0 = time.time()
-        losses = []
+        t0   = time.time()
+        loss_meter = AverageMeter("Loss", torch.device(device), ":.4f")
 
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad()
             pred = model(x)
-            loss = combined_loss(pred, y,
-                                 bce_weight=args.bce_weight,
-                                 recall_weight=1.0 - args.bce_weight)
+            loss = combined_loss(pred, y, bce_weight=args.bce_weight)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            losses.append(loss.item())
+            loss_meter.update(loss.item(), x.size(0))
 
         scheduler.step()
-        avg_loss = float(np.mean(losses))
-        elapsed  = time.time() - t0
+        elapsed = time.time() - t0
+        lr_now  = scheduler.get_last_lr()[0]
 
-        # ── Validation ───────────────────────────────────────────────────────
-        if epoch % args.val_every == 0 or epoch == args.num_epochs:
-            metrics = compute_metrics(model, val_loader, device,
-                                      threshold=args.threshold)
+        # ── Validation ───────────────────────────────────────────────────
+        is_val_epoch = (epoch % args.val_every == 0) or (epoch == args.num_epochs)
+        metrics  = compute_metrics(model, val_loader, device, args.threshold) \
+                   if is_val_epoch else {}
+        is_best  = is_val_epoch and metrics.get("recall", 0) > best_recall
+
+        if is_val_epoch:
             logger.info(
-                "Epoch %3d/%d  loss=%.4f  rec=%.3f  prec=%.3f  dice=%.3f  "
-                "lr=%.2e  [%.1fs]",
-                epoch, args.num_epochs, avg_loss,
+                "Ep %3d/%d  loss=%.4f  rec=%.3f  prec=%.3f  dice=%.3f  "
+                "lr=%.2e  %.1fs%s",
+                epoch, args.num_epochs, loss_meter.avg,
                 metrics["recall"], metrics["precision"], metrics["dice"],
-                scheduler.get_last_lr()[0], elapsed,
+                lr_now, elapsed, "  ★ best" if is_best else "",
             )
-
-            if metrics["recall"] > best_recall:
-                best_recall = metrics["recall"]
-                _save(model, best_path, epoch, metrics)
-                logger.info("  → New best recall %.3f — saved to %s",
-                            best_recall, best_path)
         else:
-            logger.info("Epoch %3d/%d  loss=%.4f  [%.1fs]",
-                        epoch, args.num_epochs, avg_loss, elapsed)
+            logger.info("Ep %3d/%d  loss=%.4f  lr=%.2e  %.1fs",
+                        epoch, args.num_epochs, loss_meter.avg, lr_now, elapsed)
 
-    _save(model, last_path, args.num_epochs, {})
-    logger.info("Training complete.  Best recall: %.3f", best_recall)
-    logger.info("Best checkpoint : %s", best_path)
-    logger.info("Last checkpoint : %s", last_path)
+        if is_best:
+            best_recall = metrics["recall"]
+            _save_ckpt(model, best_path, epoch, metrics)
+            logger.info("  Saved best → %s", best_path)
+
+        # ── CSV row ───────────────────────────────────────────────────────
+        with open(log_csv, "a", newline="") as f:
+            csv.writer(f).writerow([
+                epoch, f"{loss_meter.avg:.6f}",
+                f"{metrics.get('recall',    ''):.4f}" if metrics else "",
+                f"{metrics.get('precision', ''):.4f}" if metrics else "",
+                f"{metrics.get('dice',      ''):.4f}" if metrics else "",
+                f"{lr_now:.2e}",
+                f"{elapsed:.1f}",
+                int(is_best),
+            ])
+
+    _save_ckpt(model, last_path, args.num_epochs, {})
+    logger.info("Training complete.")
+    logger.info("  Best recall : %.3f", best_recall)
+    logger.info("  Best ckpt   : %s",   best_path)
+    logger.info("  Last ckpt   : %s",   last_path)
+    logger.info("  Training log: %s",   log_csv)
 
 
-def _save(model: Small3DUNet, path: str, epoch: int, metrics: dict) -> None:
-    torch.save(
-        {
-            "model_state": model.state_dict(),
-            "epoch": epoch,
-            "metrics": metrics,
-            "config": {
-                "in_channels": model._in_channels,
-                "base": model._base,
-                "dropout": model._dropout,
-            },
+def _save_ckpt(model: Small3DUNet, path: str, epoch: int, metrics: dict) -> None:
+    torch.save({
+        "model_state": model.state_dict(),
+        "epoch":       epoch,
+        "metrics":     metrics,
+        "config": {
+            "in_channels": model.in_channels,
+            "base":        model.base,
+            "dropout":     model.dropout,
         },
-        path,
-    )
+    }, path)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -340,45 +358,40 @@ def _save(model: Small3DUNet, path: str, epoch: int, metrics: dict) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Train the Small3DUNet proposal network on HECKTOR NPZ data.",
+        description="Train the Small3DUNet tumour proposal network.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     # Data
     p.add_argument("--train_dir", required=True,
                    help="Directory with training NPZ files.")
     p.add_argument("--val_dir", default=None,
-                   help="Directory with validation NPZ files. "
-                        "Defaults to --train_dir if not set.")
-    p.add_argument("--output_dir", default="./auto_prompting/checkpoints",
-                   help="Where to save checkpoints.")
+                   help="Directory with val NPZ files (defaults to train_dir).")
+    p.add_argument("--output_dir",
+                   default="/data/ethan/MedSAM2/proposal_net/checkpoints",
+                   help="Where to save checkpoints and training_log.csv.")
 
     # Architecture
-    p.add_argument("--base_features", type=int, default=16,
-                   help="Base feature-map count for the U-Net.")
-    p.add_argument("--dropout", type=float, default=0.1,
-                   help="Dropout3d probability.")
+    p.add_argument("--base_features", type=int, default=16)
+    p.add_argument("--dropout",       type=float, default=0.1)
 
     # Training
-    p.add_argument("--num_epochs", type=int, default=40,
-                   help="Number of training epochs.")
-    p.add_argument("--batch_size", type=int, default=1,
-                   help="Batch size (full volumes; reduce if OOM).")
-    p.add_argument("--lr", type=float, default=1e-3,
-                   help="Initial learning rate (cosine decay).")
-    p.add_argument("--weight_decay", type=float, default=1e-4)
-    p.add_argument("--bce_weight", type=float, default=0.3,
-                   help="Weight on BCE loss; recall weight = 1 - bce_weight.")
-    p.add_argument("--crop_size", type=str, default="64,128,128",
-                   help="D,H,W random crop size. Set to '' for full-volume.")
-    p.add_argument("--threshold", type=float, default=0.25,
-                   help="Probability threshold for metric computation.")
+    p.add_argument("--num_epochs",    type=int,   default=40)
+    p.add_argument("--batch_size",    type=int,   default=1)
+    p.add_argument("--lr",            type=float, default=1e-3)
+    p.add_argument("--weight_decay",  type=float, default=1e-4)
+    p.add_argument("--bce_weight",    type=float, default=0.3,
+                   help="BCE weight; recall weight = 1 − bce_weight.")
+    p.add_argument("--crop_size",     type=str,   default="64,128,128",
+                   help="D,H,W crop. Pass empty string for full-volume.")
+    p.add_argument("--threshold",     type=float, default=0.25,
+                   help="Probability threshold used for metric computation.")
+    p.add_argument("--val_every",     type=int,   default=5)
 
     # Misc
-    p.add_argument("--val_every", type=int, default=5,
-                   help="Run validation every N epochs.")
-    p.add_argument("--num_workers", type=int, default=2)
-    p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--num_workers",   type=int,   default=2)
+    p.add_argument("--device",        type=str,
+                   default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--seed",          type=int,   default=42)
 
     return p.parse_args()
 
