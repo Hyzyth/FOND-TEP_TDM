@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class ConvBlock(nn.Module):
@@ -88,8 +89,15 @@ class Small3DUNet(nn.Module):
         e2 = self.enc2(self.pool1(e1))
         b  = self.neck(self.pool2(e2))
 
-        d2 = self.dec2(torch.cat([self.up2(b),  e2], dim=1))
-        d1 = self.dec1(torch.cat([self.up1(d2), e1], dim=1))
+        d2 = self.up2(b)
+        if d2.shape[-3:] != e2.shape[-3:]:
+            d2 = F.interpolate(d2, size=e2.shape[-3:], mode="trilinear", align_corners=False)
+        d2 = self.dec2(torch.cat([d2, e2], dim=1))
+
+        d1 = self.up1(d2)
+        if d1.shape[-3:] != e1.shape[-3:]:
+            d1 = F.interpolate(d1, size=e1.shape[-3:], mode="trilinear", align_corners=False)
+        d1 = self.dec1(torch.cat([d1, e1], dim=1))
 
         return torch.sigmoid(self.head(d1))
 
