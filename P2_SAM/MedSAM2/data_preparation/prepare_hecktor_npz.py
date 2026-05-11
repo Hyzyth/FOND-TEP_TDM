@@ -333,7 +333,7 @@ if __name__ == "__main__":
         description="Convert HECKTOR NIfTI data to MedSAM2 NPZ format."
     )
     parser.add_argument("--data_dir", type=str,
-        default="/data/santiago/HECKTOR_data/Task_1_segmentation",
+        default="/data/santiago/HECKTOR_data/2025/Task_1_segmentation",
         help="Root directory with one sub-folder per patient.",
     )
     parser.add_argument("--output_dir", type=str,
