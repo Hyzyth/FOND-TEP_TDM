@@ -221,7 +221,7 @@ def make_net_figure(patient_id: str, data: dict,
     with torch.no_grad():
         prob = model(x)[0, 0].cpu().numpy()   # (D, H, W)
 
-    thresholds = [0.15, 0.25, 0.35]
+    thresholds = [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95]
     n_rows, n_cols = len(thresholds), 3  # prob map | binary+boxes | CT+GT
 
     fig, axes = plt.subplots(n_rows, n_cols,

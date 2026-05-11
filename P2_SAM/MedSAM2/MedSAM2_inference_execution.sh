@@ -191,7 +191,7 @@ if [ "$SKIP_UNET" -eq 0 ]; then
         echo "  [WARN] Proposal model not found at $PROPOSAL_MODEL"
         echo "  Run the training script first. Skipping UNet section."
     else
-        for THRESH in 0.15 0.25 0.35; do
+        for THRESH in 0.05 0.15 0.25 0.35 0.45 0.55 0.65 0.75 0.85 0.95; do
             THRESH_STR=$(echo "$THRESH" | tr '.' '_')
             run_infer "unet_t${THRESH_STR}" \
                 --imgs_path       "$NPZ_VAL"        \
@@ -218,7 +218,7 @@ if [ "$SKIP_HYBRID" -eq 0 ]; then
         echo "  [WARN] Proposal model not found at $PROPOSAL_MODEL — skipping Hybrid."
     else
         for PET_METHOD in base41 nestle black daisne; do
-            for THRESH in 0.15 0.25 0.35; do
+            for THRESH in 0.05 0.15 0.25 0.35 0.45 0.55 0.65 0.75 0.85 0.95; do
                 THRESH_STR=$(echo "$THRESH" | tr '.' '_')
                 run_infer "hybrid_${PET_METHOD}_t${THRESH_STR}" \
                     --imgs_path       "$NPZ_VAL"        \
