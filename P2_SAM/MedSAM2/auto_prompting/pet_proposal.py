@@ -177,22 +177,29 @@ def daisne_mask(suv: np.ndarray,
     thr = 0.41 * float(suv.max())
     prev_vol = -1
     mask = suv > thr
+
     for _ in range(max_iter):
         vol = int(mask.sum())
         if abs(vol - prev_vol) <= 1 or vol == 0:
             break
+
         prev_vol = vol
         mask_vals = suv[mask]
-        maxavg = float(np.percentile(mask_vals, 90))
-        bg = (~mask) & (suv > 0.5)
-        bavg = float(suv[bg].mean()) if bg.sum() > 0 else 1.0
-        contmeas = maxavg / bavg if bavg > 0 else 1.0
-        if contmeas <= 0:
+        if mask_vals.size == 0:
             break
+
+        # Maxavg: top 10% mean
+        k = max(1, int(0.1 * mask_vals.size))
+        maxavg = float(np.mean(np.sort(mask_vals)[-k:]))
+
+        # Background: full complement
+        bg = ~mask
+        bavg = float(suv[bg].mean()) if bg.sum() > 0 else float(suv.mean())
+
+        contmeas = maxavg / (bavg + 1e-6)
         thr = a + b / contmeas
         mask = suv > thr
     return mask
-
 
 # ---------------------------------------------------------------------------
 # Shape filtering

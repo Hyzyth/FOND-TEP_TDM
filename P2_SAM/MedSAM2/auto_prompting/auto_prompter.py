@@ -51,7 +51,7 @@ from typing import Optional
 import numpy as np
 import torch
 
-from auto_prompting.pet_proposals import get_pet_proposals, mask_to_proposals
+from auto_prompting.pet_proposal import get_pet_proposals, mask_to_proposals
 from auto_prompting.box_utils import iou_3d, nms_3d
 
 logger = logging.getLogger(__name__)

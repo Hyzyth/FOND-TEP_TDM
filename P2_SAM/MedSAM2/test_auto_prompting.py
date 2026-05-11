@@ -55,7 +55,7 @@ for candidate in [_HERE, _HERE.parent]:
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from auto_prompting.pet_proposals import (
+from auto_prompting.pet_proposal import (
     get_pet_proposals, reconstruct_suv,
     base41_mask, nestle_mask, black_mask, daisne_mask,
 )
@@ -142,9 +142,12 @@ def make_pet_figure(patient_id: str, data: dict,
                              figsize=(n_cols * 4, n_rows * 3.5),
                              constrained_layout=True)
     fig.patch.set_facecolor("#111111")
+
+    suv_text = f"{smx:.2f}" if smx is not None else "N/A"
     fig.suptitle(
-        f"PET proposals — {patient_id}  |  suv_max={smx:.2f if smx else 'N/A'}",
-        color="white", fontsize=10,
+        f"PET proposals — {patient_id}  |  suv_max={suv_text}",
+        color="white",
+        fontsize=10,
     )
 
     for row, method in enumerate(PET_METHODS):
