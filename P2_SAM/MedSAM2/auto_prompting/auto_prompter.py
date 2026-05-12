@@ -69,7 +69,7 @@ def _unet_proposals(ct_uint8: np.ndarray,
                     slice_pad: int = 1,
                     planar_pad: int = 5) -> list[dict]:
     """Run the Small3DUNet and convert the probability map to proposals."""
-    ct  = ct_uint8.astype(np.float32) / 255.0
+    ct  = ct_uint8.astype(np.float32)  / 255.0
     pet = pet_uint8.astype(np.float32) / 255.0
 
     x = torch.tensor(np.stack([ct, pet], axis=0)).unsqueeze(0).float().to(device)
@@ -125,22 +125,30 @@ def _hybrid_filter(pet_props: list[dict],
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _assign_labels(proposals: list[dict]) -> dict[int, list[dict]]:
-    """Assign GTVp (1) to the largest candidate, GTVn (2) to the rest."""
+    """Assign GTVp (1) to the largest candidate, GTVn (2) to the rest.
+
+    Edge cases
+    ----------
+    Some patients have only GTVp (labels 0,1), some only GTVn (labels 0,2),
+    most have both.  We cannot distinguish at auto-prompting time, so:
+
+    * Multiple proposals → largest = GTVp, rest = GTVn  (standard heuristic).
+    * Single proposal   → assigned to BOTH GTVp and GTVn.
+      This avoids a hard miss for GTVn-only patients at essentially zero cost
+      for GTVp-only patients: evaluate_hecktor.py returns NaN (excluded from
+      the mean) whenever the GT for a label is entirely absent.
+    """
     if not proposals:
         return {}
 
-    result: dict[int, list[dict]] = {}
+    result: dict[int, list[dict]] = {1: [{**proposals[0], "component_id": 1}]}
 
-    # Largest → GTVp
-    gtvp = {**proposals[0], "component_id": 1}
-    result[1] = [gtvp]
-
-    # Remaining → GTVn
-    if len(proposals) > 1:
-        gtvn = []
-        for i, p in enumerate(proposals[1:], start=1):
-            gtvn.append({**p, "component_id": i})
-        result[2] = gtvn
+    if len(proposals) == 1:
+        # Cannot tell GTVp-only from GTVn-only → predict both from the same blob.
+        result[2] = [{**proposals[0], "component_id": 1}]
+    else:
+        result[2] = [{**p, "component_id": i}
+                     for i, p in enumerate(proposals[1:], start=1)]
 
     return result
 
@@ -221,15 +229,15 @@ class AutoPrompter:
         ----------
         ct_uint8     : (D, H, W) uint8 CT array (from NPZ)
         pet_uint8    : (D, H, W) uint8 PET array (from NPZ)
-        suv_max      : per-patient SUV scaling factor (from NPZ)
-                       Required for 'black' and 'daisne' PET methods.
+        suv_max      : per-patient SUV scaling factor (NPZ key 'pet_suv_max').
+                       Required for 'nestle', 'black', and 'daisne'.
         max_proposals: cap on total proposals after NMS (default 10)
 
         Returns
         -------
         {label_id: [component_dict, ...]}
         """
-        raw_proposals: list[dict] = []
+        pet_props = unet_props = []
 
         if self.method in ("pet", "hybrid"):
             pet_props = get_pet_proposals(
@@ -240,7 +248,7 @@ class AutoPrompter:
                 slice_pad  = self.slice_pad,
                 planar_pad = self.planar_pad,
             )
-            logger.info("PET proposals (before NMS): %d", len(pet_props))
+            logger.debug("PET proposals (before NMS): %d", len(pet_props))
 
         if self.method in ("unet", "hybrid"):
             unet_props = _unet_proposals(
@@ -253,7 +261,7 @@ class AutoPrompter:
                 slice_pad  = self.slice_pad,
                 planar_pad = self.planar_pad,
             )
-            logger.info("UNet proposals: %d", len(unet_props))
+            logger.debug("UNet proposals: %d", len(unet_props))
 
         if self.method == "pet":
             raw = pet_props
