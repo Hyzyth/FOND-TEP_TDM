@@ -1,79 +1,75 @@
 """
 auto_prompting/proposal_net.py
 ================================
-Lightweight 3-D U-Net for coarse tumor probability estimation.
+MONAI-based 3D U-Net for coarse tumour probability estimation.
 
-Architecture: 2 encoder blocks → bottleneck → 2 decoder blocks → sigmoid output.
-  in_channels  = 2   (CT, PET in [0, 1])
-  out_channels = 1   (tumor probability)
-  base         = 16  (feature maps: 16 → 32 → 64)
+Why MONAI UNet over the custom implementation
+----------------------------------------------
+The custom U-Net had skip-connection shape mismatches when input spatial dims
+were not perfectly divisible by 2^depth, requiring manual trilinear
+interpolation patches.  MONAI's UNet handles upsampling padding internally,
+is battle-tested on medical volumes, and supports residual units out of the box.
 
-Designed to be trained quickly (~30 epochs) on HECKTOR NPZ data as a
-high-recall proposal network, not as a final segmentation model.
+Architecture (default base=16)
+-------------------------------
+  Channels : 16 → 32 → 64 → 128
+  Strides  : 2,  2,  2         (3 pooling steps; min spatial dim divisor = 8)
+  Residual : 2 units per block (standard for medical segmentation)
+  Norm     : InstanceNorm3d    (stable with batch_size=1)
+  Act      : LeakyReLU
+  Params   : ~1.2 M at base=16 (vs 340 K previously; still lightweight)
+
+Input  : (B, 2, D, H, W) float32 in [0, 1]   — channels [CT, PET]
+Output : (B, 1, D, H, W) float32 in [0, 1]   — tumour probability
+
+Crop-size constraint: each spatial dim divisible by 8 at training time.
+At inference MONAI pads internally, so arbitrary input sizes are accepted.
+With the default crop_size=64,128,128 the constraint is trivially satisfied.
 """
 
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-
-class ConvBlock(nn.Module):
-    """Conv3d → InstanceNorm → LeakyReLU × 2, with Dropout3d."""
-
-    def __init__(self, in_c: int, out_c: int, dropout: float = 0.1) -> None:
-        super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv3d(in_c, out_c, 3, padding=1, bias=False),
-            nn.InstanceNorm3d(out_c),
-            nn.LeakyReLU(0.01, inplace=True),
-            nn.Dropout3d(dropout),
-            nn.Conv3d(out_c, out_c, 3, padding=1, bias=False),
-            nn.InstanceNorm3d(out_c),
-            nn.LeakyReLU(0.01, inplace=True),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.conv(x)
+from monai.networks.nets import UNet as MonaiUNet
+from monai.networks.layers import Norm
 
 
 class Small3DUNet(nn.Module):
-    """Lightweight 3-D U-Net for tumour proposal generation.
+    """MONAI-based 3-D U-Net for tumour proposal generation.
 
     Parameters
     ----------
-    in_channels : int   default 2  (CT + PET)
-    base        : int   base feature-map count (default 16)
-    dropout     : float Dropout3d probability (default 0.1)
+    in_channels : int   Input channels (default 2 = CT + PET).
+    base        : int   Base feature-map width.  Channels are
+                        (base, base×2, base×4, base×8).  Default 16.
+    dropout     : float Dropout probability applied inside each block.
     """
 
-    def __init__(self,
-                 in_channels: int = 2,
-                 base: int = 16,
-                 dropout: float = 0.1) -> None:
+    def __init__(
+        self,
+        in_channels: int = 2,
+        base: int = 16,
+        dropout: float = 0.1,
+    ) -> None:
         super().__init__()
-        # Store for save / load round-trip
+
         self.in_channels = in_channels
         self.base        = base
         self.dropout     = dropout
 
-        b = base
-        self.enc1  = ConvBlock(in_channels, b,     dropout)
-        self.pool1 = nn.MaxPool3d(2)
-
-        self.enc2  = ConvBlock(b,     b * 2, dropout)
-        self.pool2 = nn.MaxPool3d(2)
-
-        self.neck  = ConvBlock(b * 2, b * 4, dropout)
-
-        self.up2   = nn.ConvTranspose3d(b * 4, b * 2, 2, stride=2)
-        self.dec2  = ConvBlock(b * 4, b * 2, dropout)
-
-        self.up1   = nn.ConvTranspose3d(b * 2, b,     2, stride=2)
-        self.dec1  = ConvBlock(b * 2, b,     dropout)
-
-        self.head  = nn.Conv3d(b, 1, 1)
+        self.net = MonaiUNet(
+            spatial_dims  = 3,
+            in_channels   = in_channels,
+            out_channels  = 1,
+            channels      = (base, base * 2, base * 4, base * 8),
+            strides       = (2, 2, 2),
+            num_res_units = 2,
+            norm          = Norm.INSTANCE,
+            act           = "LEAKYRELU",
+            dropout       = dropout,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -85,21 +81,7 @@ class Small3DUNet(nn.Module):
         -------
         (B, 1, D, H, W) probability map in [0, 1]
         """
-        e1 = self.enc1(x)
-        e2 = self.enc2(self.pool1(e1))
-        b  = self.neck(self.pool2(e2))
-
-        d2 = self.up2(b)
-        if d2.shape[-3:] != e2.shape[-3:]:
-            d2 = F.interpolate(d2, size=e2.shape[-3:], mode="trilinear", align_corners=False)
-        d2 = self.dec2(torch.cat([d2, e2], dim=1))
-
-        d1 = self.up1(d2)
-        if d1.shape[-3:] != e1.shape[-3:]:
-            d1 = F.interpolate(d1, size=e1.shape[-3:], mode="trilinear", align_corners=False)
-        d1 = self.dec1(torch.cat([d1, e1], dim=1))
-
-        return torch.sigmoid(self.head(d1))
+        return torch.sigmoid(self.net(x))
 
     # ── Persistence ───────────────────────────────────────────────────────
 

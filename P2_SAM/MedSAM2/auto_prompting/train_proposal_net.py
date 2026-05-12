@@ -159,21 +159,28 @@ class HECKTORProposalDataset(Dataset):
 # Loss functions
 # ──────────────────────────────────────────────────────────────────────────────
 
-def recall_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """1 – Recall = FN / (TP + FN).  Encourages high sensitivity."""
+def dice_loss(pred: torch.Tensor, target: torch.Tensor,
+              eps: float = 1e-6) -> torch.Tensor:
+    """Soft Dice loss: 1 − 2TP / (2TP + FP + FN).
+
+    Unlike recall-only loss this penalises false positives, which prevented
+    the model from collapsing to "predict everything = high recall".
+    """
     tp = (pred * target).sum()
-    fn = ((1 - pred) * target).sum()
-    return 1.0 - tp / (tp + fn + eps)
+    return 1.0 - (2.0 * tp + eps) / (pred.sum() + target.sum() + eps)
 
 
 def combined_loss(pred: torch.Tensor,
                   target: torch.Tensor,
-                  bce_weight: float = 0.3,
-                  recall_weight: float = 0.7) -> torch.Tensor:
-    """Recall-biased loss: recall_weight * recall + bce_weight * BCE."""
+                  bce_weight: float = 0.3) -> torch.Tensor:
+    """Dice-biased loss: (1−bce_weight)·Dice + bce_weight·BCE.
+
+    Dice naturally balances precision and recall (FP and FN hurt equally),
+    while BCE provides stable gradients when predictions are near 0 or 1.
+    """
     bce = F.binary_cross_entropy(pred, target)
-    rec = recall_loss(pred, target)
-    return bce_weight * bce + recall_weight * rec
+    dl  = dice_loss(pred, target)
+    return bce_weight * bce + (1.0 - bce_weight) * dl
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -265,7 +272,7 @@ def train(args: argparse.Namespace) -> None:
         optimizer, T_max=args.num_epochs, eta_min=args.lr / 20
     )
 
-    best_recall = 0.0
+    best_dice = 0.0
     best_path   = os.path.join(args.output_dir, "proposal_net_best.pt")
     last_path   = os.path.join(args.output_dir, "proposal_net_last.pt")
 
@@ -300,14 +307,25 @@ def train(args: argparse.Namespace) -> None:
         is_val_epoch = (epoch % args.val_every == 0) or (epoch == args.num_epochs)
         metrics  = compute_metrics(model, val_loader, device, args.threshold) \
                    if is_val_epoch else {}
-        is_best  = is_val_epoch and metrics.get("recall", 0) > best_recall
+        
+        # Save best checkpoint when Dice improves AND recall stays above the
+        # minimum guard.  This prevents saving a model that achieves high Dice
+        # by being overly conservative (low recall).
+        is_best = (
+            is_val_epoch
+            and metrics.get("dice", 0) > best_dice
+            and metrics.get("recall", 0) >= args.min_recall_for_save
+        )
 
         if is_val_epoch:
+            above_guard = metrics["recall"] >= args.min_recall_for_save
             logger.info(
-                "Ep %3d/%d  loss=%.4f  rec=%.3f  prec=%.3f  dice=%.3f  "
+                "Ep %3d/%d  loss=%.4f  rec=%.3f%s  prec=%.3f  dice=%.3f  "
                 "lr=%.2e  %.1fs%s",
                 epoch, args.num_epochs, loss_meter.avg,
-                metrics["recall"], metrics["precision"], metrics["dice"],
+                metrics["recall"],
+                "" if above_guard else f" [< guard {args.min_recall_for_save:.2f}]",
+                metrics["precision"], metrics["dice"],
                 lr_now, elapsed, "  ★ best" if is_best else "",
             )
         else:
@@ -315,9 +333,10 @@ def train(args: argparse.Namespace) -> None:
                         epoch, args.num_epochs, loss_meter.avg, lr_now, elapsed)
 
         if is_best:
-            best_recall = metrics["recall"]
+            best_dice = metrics["dice"]
             _save_ckpt(model, best_path, epoch, metrics)
-            logger.info("  Saved best → %s", best_path)
+            logger.info("  Saved best → %s  (dice=%.3f  rec=%.3f)",
+                        best_path, best_dice, metrics["recall"])
 
         # ── CSV row ───────────────────────────────────────────────────────
         with open(log_csv, "a", newline="") as f:
@@ -333,7 +352,7 @@ def train(args: argparse.Namespace) -> None:
 
     _save_ckpt(model, last_path, args.num_epochs, {})
     logger.info("Training complete.")
-    logger.info("  Best recall : %.3f", best_recall)
+    logger.info("  Best dice   : %.3f  (recall guard: ≥ %.2f)", best_dice, args.min_recall_for_save)
     logger.info("  Best ckpt   : %s",   best_path)
     logger.info("  Last ckpt   : %s",   last_path)
     logger.info("  Training log: %s",   log_csv)
@@ -386,6 +405,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--threshold",     type=float, default=0.25,
                    help="Probability threshold used for metric computation.")
     p.add_argument("--val_every",     type=int,   default=5)
+    p.add_argument("--min_recall_for_save", type=float, default=0.80,
+                   help="Minimum recall a checkpoint must achieve to be saved as 'best'. "
+                        "Prevents saving a high-Dice but low-recall (over-conservative) model. "
+                        "Set to 0 to rank purely by Dice.")
 
     # Misc
     p.add_argument("--num_workers",   type=int,   default=2)
