@@ -39,11 +39,12 @@ does not apply, since those are specific to the proposal-generation context.
 from __future__ import annotations
 
 import logging
+import sys
+import os
 import warnings
 from typing import Optional
 
 import numpy as np
-from scipy.ndimage import label as cc_label
 
 logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
@@ -98,10 +99,15 @@ def reconstruct_suv(pet_uint8: np.ndarray, suv_max: float) -> np.ndarray:
 # Threshold functions
 # ──────────────────────────────────────────────────────────────────────────────
 
-def base41_mask(pet: np.ndarray) -> np.ndarray:
-    """41 % of SUV_max thresholding.  Works on both uint8 and raw SUV."""
-    thr = 0.41 * float(pet.max())
-    return pet > thr
+def base41_mask(pet: np.ndarray, pct: float = 0.41) -> np.ndarray:
+    """*pct* × SUV_max thresholding.  Scale-invariant — works on uint8 or raw SUV.
+
+    Parameters
+    ----------
+    pet : (D, H, W) array — uint8 from NPZ or raw SUV float32
+    pct : threshold as a fraction of SUVmax (default 0.41 = 41 %)
+    """
+    return pet > pct * float(pet.max())
 
 
 def nestle_mask(suv: np.ndarray,
@@ -180,23 +186,22 @@ def daisne_mask(suv: np.ndarray,
 
     for _ in range(max_iter):
         vol = int(mask.sum())
+
         if abs(vol - prev_vol) <= 1 or vol == 0:
             break
 
         prev_vol = vol
-        mask_vals = suv[mask]
-        if mask_vals.size == 0:
+        vals   = suv[mask]
+        maxavg = float(np.percentile(vals, 90))
+        bg     = (~mask) & (suv > 0.5)
+
+        bavg   = float(suv[bg].mean()) if bg.sum() > 0 else 1.0
+
+        contmeas = maxavg / bavg if bavg > 0 else 1.0
+
+        if contmeas <= 0:
             break
 
-        # Maxavg: top 10% mean
-        k = max(1, int(0.1 * mask_vals.size))
-        maxavg = float(np.mean(np.sort(mask_vals)[-k:]))
-
-        # Background: full complement
-        bg = ~mask
-        bavg = float(suv[bg].mean()) if bg.sum() > 0 else float(suv.mean())
-
-        contmeas = maxavg / (bavg + 1e-6)
         thr = a + b / contmeas
         mask = suv > thr
     return mask
@@ -307,22 +312,24 @@ def get_pet_proposals(pet_uint8: np.ndarray,
                       max_elongation: float = 15.0,
                       min_compactness: float = 0.04,
                       slice_pad: int = 1,
-                      planar_pad: int = 5) -> list[dict]:
+                      planar_pad: int = 5,
+                      **method_kwargs) -> list[dict]:
     """Run PET thresholding and return a list of candidate proposals.
 
     Parameters
     ----------
     pet_uint8      : (D, H, W) uint8 PET array from the NPZ file
-    suv_max        : float or None – per-patient scale factor (from NPZ key
-                     ``pet_suv_max``, written by updated prepare_hecktor_npz.py).
-                     Required for 'nestle', 'black', and 'daisne'.
+    suv_max        : per-patient scale factor (from NPZ ``pet_suv_max``).
+                     Required for 'nestle', 'black', 'daisne'.
     method         : 'base41' | 'nestle' | 'black' | 'daisne'
     min_volume     : minimum component size in voxels
     max_elongation : discard very elongated components (vessels, etc.)
     min_compactness: discard very sparse components
     slice_pad      : axial (Z) bounding-box padding in slices
-                     (applied along the viewing/propagation axis)
     planar_pad     : planar (Y, X) bounding-box padding in voxels
+    **method_kwargs: forwarded directly to the thresholding function, e.g.
+                     pct=0.35 for base41, alpha=0.10 for nestle,
+                     alpha=0.25, beta=0.5 for black, a=28.0, b=70.0 for daisne.
 
     Returns
     -------
@@ -343,13 +350,13 @@ def get_pet_proposals(pet_uint8: np.ndarray,
             suv = reconstruct_suv(pet_uint8, suv_max)
 
     if method == "base41":
-        binary = base41_mask(pet_uint8)
+        binary = base41_mask(pet_uint8, **method_kwargs)
     elif method == "nestle":
-        binary = nestle_mask(suv)
+        binary = nestle_mask(suv, **method_kwargs)
     elif method == "black":
-        binary = black_mask(suv)
+        binary = black_mask(suv, **method_kwargs)
     elif method == "daisne":
-        binary = daisne_mask(suv)
+        binary = daisne_mask(suv, **method_kwargs)
     else:
         raise ValueError(
             f"Unknown PET method '{method}'. "
