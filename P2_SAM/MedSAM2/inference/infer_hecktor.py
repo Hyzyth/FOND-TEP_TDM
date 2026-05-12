@@ -505,8 +505,7 @@ def infer_one_npz(
 # ---------------------------------------------------------------------------
 
 def main(args: argparse.Namespace) -> None:
-    cfg_path  = os.path.abspath(args.cfg)
-    predictor = build_sam2_video_predictor_npz(cfg_path, args.checkpoint)
+    predictor = build_sam2_video_predictor_npz(args.cfg, args.checkpoint)
 
     # ── Build auto-prompter if needed ─────────────────────────────────────
     auto_prompter = None

@@ -6,13 +6,27 @@ Factory functions for constructing SAM2 / MedSAM2 models.
 For HECKTOR inference use ``build_sam2_video_predictor_npz``, which returns
 a ``SAM2VideoPredictorNPZ`` configured for slice-by-slice 3-D propagation.
 """
-
 import logging
+import os
 
 import torch
-from hydra import compose
+from hydra import compose, initialize_config_dir
+from hydra.core.global_hydra import GlobalHydra
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
+# Register OmegaConf custom resolvers used by SAM2 configs
+
+if not OmegaConf.has_resolver("times"):
+    OmegaConf.register_new_resolver(
+        "times",
+        lambda x, y: float(x) * float(y),
+    )
+
+if not OmegaConf.has_resolver("divide"):
+    OmegaConf.register_new_resolver(
+        "divide",
+        lambda x, y: float(x) / float(y),
+    )
 
 # Mapping from HuggingFace model IDs to (config, checkpoint) filenames.
 HF_MODEL_ID_TO_FILENAMES = {
@@ -89,7 +103,21 @@ def build_sam2(
             "++model.sam_mask_decoder_extra_args.dynamic_multimask_stability_thresh=0.98",
         ]
 
-    cfg = compose(config_name=config_file, overrides=hydra_overrides_extra)
+    config_dir = os.path.abspath(os.path.dirname(config_file))
+    config_name = os.path.splitext(os.path.basename(config_file))[0]
+
+    if GlobalHydra.instance().is_initialized():
+        GlobalHydra.instance().clear()
+
+    with initialize_config_dir(
+        config_dir=config_dir,
+        version_base=None,
+    ):
+        cfg = compose(
+            config_name=config_name,
+            overrides=hydra_overrides_extra,
+        )
+
     OmegaConf.resolve(cfg)
     model = instantiate(cfg.model, _recursive_=True)
     _load_checkpoint(model, ckpt_path)
@@ -147,7 +175,22 @@ def build_sam2_video_predictor_npz(
         ]
 
     hydra_overrides.extend(hydra_overrides_extra)
-    cfg = compose(config_name=config_file, overrides=hydra_overrides)
+
+    config_dir = os.path.abspath(os.path.dirname(config_file))
+    config_name = os.path.splitext(os.path.basename(config_file))[0]
+
+    if GlobalHydra.instance().is_initialized():
+        GlobalHydra.instance().clear()
+
+    with initialize_config_dir(
+        config_dir=config_dir,
+        version_base=None,
+    ):
+        cfg = compose(
+            config_name=config_name,
+            overrides=hydra_overrides,
+        )
+
     OmegaConf.resolve(cfg)
     model = instantiate(cfg.model, _recursive_=True)
     _load_checkpoint(model, ckpt_path)

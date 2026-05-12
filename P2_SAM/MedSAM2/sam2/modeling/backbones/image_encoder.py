@@ -5,6 +5,7 @@ ImageEncoder (trunk + FPN neck) and related layers for SAM2.
 """
 
 from typing import List, Optional
+from collections import OrderedDict
 
 import torch
 import torch.nn as nn
@@ -98,7 +99,9 @@ class FpnNeck(nn.Module):
         self.backbone_channel_list = backbone_channel_list
         self.d_model = d_model
         self.convs = nn.ModuleList([
-            nn.Sequential(nn.Conv2d(dim, d_model, kernel_size, stride, padding))
+            nn.Sequential(OrderedDict([
+                ("conv", nn.Conv2d(dim, d_model, kernel_size, stride, padding))
+            ]))
             for dim in backbone_channel_list
         ])
         self.fpn_interp_model = fpn_interp_model

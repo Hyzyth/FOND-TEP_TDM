@@ -42,7 +42,7 @@ source medsam2_env/bin/activate
 NPZ_VAL=/data/ethan/MedSAM2/hecktor_npz/val
 NPZ_TRAIN=/data/ethan/MedSAM2/hecktor_npz/train
 CHECKPOINT=./checkpoints/MedSAM2_latest.pt
-CFG=sam2/configs/sam2.1_hiera_tiny_hecktor.yaml
+CFG=sam2/configs/sam2.1_hiera_tiny_hecktor_infer.yaml
 PRED_ROOT=/data/ethan/MedSAM2/predictions
 PROPOSAL_MODEL=/data/ethan/MedSAM2/proposal_net/checkpoints/proposal_net_best.pt
 
@@ -54,9 +54,9 @@ ln -sfn /data/ethan/MedSAM2/runs ./runs
 
 # ── Per-section skip flags (1=skip, 0=run) ───────────────────────────────────
 SKIP_GT=0
-SKIP_PET=0
-SKIP_UNET=0
-SKIP_HYBRID=0
+SKIP_PET=1
+SKIP_UNET=1
+SKIP_HYBRID=1
 SKIP_EVAL=0
 
 GPU=0
@@ -105,25 +105,6 @@ run_eval() {
         --output   "$FULL_PATH/dsc_results.csv"  \
         2>&1 | tee "$FULL_PATH/evaluation.log"
 }
-
-# =============================================================================
-# STEP 2.A.1 — Inference on validation set using best checkpoint  [ACTIVE]
-#
-# --bbox_shift 5  : add a 5-voxel margin around GT bounding boxes (oracle mode)
-# --save_nifti    : write predicted masks as .nii.gz for visual QC in ITK-SNAP
-# --save_overlays : write axial PNG overlays (CT + GTVp/GTVn colour overlay)
-# =============================================================================
-
-CUDA_VISIBLE_DEVICES=0 python3.10 inference/infer_hecktor.py \
-    --checkpoint    "$CHECKPOINT" \
-    --cfg           "$CFG" \
-    --imgs_path     "$NPZ_VAL" \
-    --pred_save_dir "$PRED_ROOT/gt_oracle" \
-    --bbox_mode     gt \
-    --bbox_shift    5 \
-    --save_nifti \
-    --save_overlays \
-    2>&1 | tee "$PRED_ROOT/gt_oracle/inference_val.log"
 
 # =============================================================================
 # SECTION 1 — GT oracle  (ground-truth boxes; development / ceiling estimate)
