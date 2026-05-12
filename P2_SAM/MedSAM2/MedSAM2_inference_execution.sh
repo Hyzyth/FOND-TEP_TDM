@@ -115,21 +115,27 @@ if [ "$SKIP_GT" -eq 0 ]; then
     echo "║   SECTION 1 — GT Oracle      ║"
     echo "╚══════════════════════════════╝"
 
-    # 1a  Val — standard padding (planar=5 vox, slice=1)
-    run_infer "gt_val" \
-        --imgs_path "$NPZ_VAL" \
-        --bbox_mode gt --bbox_shift 5 --slice_pad 1 \
-        --save_nifti
+    # # 1a  Val — standard padding (planar=5 vox, slice=1)
+    # run_infer "gt_val" \
+    #     --imgs_path "$NPZ_VAL" \
+    #     --bbox_mode gt --bbox_shift 5 --slice_pad 1 \
+    #     --save_nifti
 
-    # 1b  Train — overfit check (same settings, different split)
-    run_infer "gt_train_overfit" \
-        --imgs_path "$NPZ_TRAIN" \
-        --bbox_mode gt --bbox_shift 5 --slice_pad 1
+    # # 1b  Train — overfit check (same settings, different split)
+    # run_infer "gt_train_overfit" \
+    #     --imgs_path "$NPZ_TRAIN" \
+    #     --bbox_mode gt --bbox_shift 5 --slice_pad 1
 
-    # 1c  Val tight — zero padding (DSC ceiling with exact GT boxes)
-    run_infer "gt_val_tight" \
+    # # 1c  Val tight — zero padding (DSC ceiling with exact GT boxes)
+    # run_infer "gt_val_tight" \
+    #     --imgs_path "$NPZ_VAL" \
+    #     --bbox_mode gt --bbox_shift 0 --slice_pad 0 \
+    #     --save_nifti
+    
+    # 1d  Val reduced — negative padding (DSC ceiling with exact GT boxes)
+    run_infer "gt_val_reduced" \
         --imgs_path "$NPZ_VAL" \
-        --bbox_mode gt --bbox_shift 0 --slice_pad 0 \
+        --bbox_mode gt --bbox_shift -5 --slice_pad -1 \
         --save_nifti
 fi
 
