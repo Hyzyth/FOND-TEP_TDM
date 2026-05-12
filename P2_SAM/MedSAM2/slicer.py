@@ -72,6 +72,7 @@ def find_all_components_for_label(
     slice_pad: int = 1,
     planar_pad: int = 5,
     affine: np.ndarray = None,
+    min_voxels_for_shrink: int = 500,
 ):
     """Find every connected component for a single label value.
 
@@ -79,9 +80,16 @@ def find_all_components_for_label(
     ----------
     mask        : (D, H, W) int array
     label_value : int  – label to search (1 = GTVp, 2 = GTVn)
-    slice_pad   : int  – padding applied along the primary "viewing" axis
-    planar_pad  : int  – padding applied along the two planar axes forming the slice
+    slice_pad   : int  – padding applied along the primary "viewing" axis.
+                        Negative values shrink the bbox inside the mask extent,
+                        subject to the min_voxels_for_shrink guard.
+    planar_pad  : int  – padding applied along the two planar axes forming the
+                        slice.  Same sign convention as slice_pad.
     affine      : (4,4) array or None  – when given, world-space bbox is added
+    min_voxels_for_shrink : int  – components smaller than this are never
+                        shrunk (negative padding is clamped to 0 for them).
+                        This prevents bboxes from collapsing to zero size for
+                        tiny lesions when negative padding is used.  Default 500.
 
     Returns
     -------
@@ -119,6 +127,9 @@ def find_all_components_for_label(
         y_min, y_max = indices[1].min(), indices[1].max()
         x_min, x_max = indices[2].min(), indices[2].max()
 
+        # ── Voxel count is needed early for the shrink guard ──────────────
+        voxel_count = int(np.sum(comp_mask))
+
         max_area = -1
         primary_axis = 0
         mid_slice = 0
@@ -141,11 +152,21 @@ def find_all_components_for_label(
             if area > max_area:
                 max_area, primary_axis, mid_slice = area, 2, x
 
+        # ── Volume-guard: do not apply negative padding to small components ──
+        # Negative padding shrinks the bbox *inside* the mask extent.  For
+        # very small lesions this can drive z1 ≤ z0 (empty bbox / empty
+        # cropped_mask), which causes a downstream crash in argmax.  When the
+        # component is below the size threshold we clamp each pad to ≥ 0,
+        # giving the component its natural tight bbox rather than a shrunken
+        # one.
+        eff_slice_pad  = slice_pad  if (slice_pad  >= 0 or voxel_count >= min_voxels_for_shrink) else 0
+        eff_planar_pad = planar_pad if (planar_pad >= 0 or voxel_count >= min_voxels_for_shrink) else 0
+
         # Assign padding dynamically based on the optimal viewing axis
         pads = [0, 0, 0]
-        pads[primary_axis] = slice_pad
-        pads[(primary_axis + 1) % 3] = planar_pad
-        pads[(primary_axis + 2) % 3] = planar_pad
+        pads[primary_axis] = eff_slice_pad
+        pads[(primary_axis + 1) % 3] = eff_planar_pad
+        pads[(primary_axis + 2) % 3] = eff_planar_pad
         pad_z, pad_y, pad_x = pads
 
         # 3D Bounding box (with dynamic padding, clamped to array bounds)
@@ -156,8 +177,15 @@ def find_all_components_for_label(
         x0 = max(0, int(x_min) - pad_x)
         x1 = min(W, int(x_max) + 1 + pad_x)
 
+        # ── Hard safety clamp: bbox must be at least 1 voxel in every axis ──
+        # Even with the volume guard above, floating-point coincidences or
+        # a component that is exactly 1-voxel thick can still collapse a
+        # shrunk axis to zero.  This is a last-resort guarantee.
+        z1 = max(z1, z0 + 1)
+        y1 = max(y1, y0 + 1)
+        x1 = max(x1, x0 + 1)
+
         cropped_mask = comp_mask[z0:z1, y0:y1, x0:x1]
-        voxel_count  = int(np.sum(comp_mask))
 
         # 2D Bounding box format depends on which axis we are viewing from.
         # Format is always [col_min, row_min, col_max, row_max] relative to the 2D slice.
@@ -200,13 +228,25 @@ def find_components(
     planar_pad: int = 5,
     affine: np.ndarray = None,
     label_values=(1, 2),
+    min_voxels_for_shrink: int = 500,
 ) -> dict:
-    """Find all connected components for each label in *label_values*."""
+    """Find all connected components for each label in *label_values*.
+
+    Parameters
+    ----------
+    min_voxels_for_shrink : int
+        Forwarded to :func:`find_all_components_for_label`.  Components
+        below this size are never shrunk by negative padding.  Default 500.
+    """
     present = set(np.unique(mask).tolist()).intersection(set(label_values))
     result = {}
     for lv in present:
         comps = find_all_components_for_label(
-            mask, lv, slice_pad=slice_pad, planar_pad=planar_pad, affine=affine
+            mask, lv,
+            slice_pad=slice_pad,
+            planar_pad=planar_pad,
+            affine=affine,
+            min_voxels_for_shrink=min_voxels_for_shrink,
         )
         if comps:
             result[lv] = comps
@@ -283,9 +323,15 @@ def get_z_prompt_from_component(comp: dict) -> tuple:
     # Primary axis is Y or X — derive z_mid from the cropped mask.
     cropped = comp["cropped_mask"]   # shape (z1-z0, y1-y0, x1-x0)
     dz = z1 - z0
-    z_areas = np.array([cropped[z].sum() for z in range(dz)])
-    rel_z = int(np.argmax(z_areas))
-    z_mid = z0 + rel_z
+
+    # Safety: cropped_mask should always be non-empty here (guaranteed by the
+    # hard clamp in find_all_components_for_label), but guard defensively.
+    if dz == 0 or cropped.shape[0] == 0:
+        z_mid = max(z0, (z0 + z1) // 2)
+    else:
+        z_areas = np.array([cropped[z].sum() for z in range(dz)])
+        rel_z = int(np.argmax(z_areas))
+        z_mid = z0 + rel_z
 
     # Use the padded 3-D bounding-box bounds projected onto the Z plane
     x0, x1 = comp["bbox_voxel"]["x"]
