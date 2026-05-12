@@ -92,7 +92,7 @@ echo "GPU       : $CUDA_VISIBLE_DEVICES"
 #       --input_folder /data/santiago/Datast001_HECKTOR_SwinCross/ \
 #       --json_name dataset_swincross_testing_group.json \
 # =============================================================================
-CUDA_VISIBLE_DEVICES=1 python3.12 test.py \
+CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
     --pretrained_dir        ./runs/$MODEL_DIR \
     --pretrained_model_name model_best.pth \
     --output_dir            $INFERENCE_OUTPUT/test_set_inference \
@@ -113,7 +113,7 @@ CUDA_VISIBLE_DEVICES=1 python3.12 test.py \
 #       --json_name dataset_swincross_testing_group.json \
 #       --inference_only
 # =============================================================================
-# CUDA_VISIBLE_DEVICES=1 python3.12 test.py \
+# CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
 #     --pretrained_dir        ./runs/$MODEL_DIR \
 #     --pretrained_model_name model_best.pth \
 #     --output_dir            $INFERENCE_OUTPUT/test_set_inference_only \
