@@ -58,6 +58,7 @@ BCE_WEIGHT=0.30        # Recall weight = 1 - BCE_WEIGHT = 0.70
 CROP_SIZE="64,128,128" # D,H,W crop (set to "" for full-volume, higher OOM risk)
 THRESHOLD=0.25         # Probability threshold used during validation metrics
 VAL_EVERY=5            # Run validation every N epochs
+MIN_RECALL_FOR_SAVE=0.80  # Only save checkpoint if recall >= this value
 
 NUM_WORKERS=2
 SEED=42
@@ -91,6 +92,7 @@ CUDA_VISIBLE_DEVICES=$GPU python3.10 -m auto_prompting.train_proposal_net \
     --crop_size     "$CROP_SIZE"    \
     --threshold     "$THRESHOLD"    \
     --val_every     "$VAL_EVERY"    \
+    --min_recall_for_save "$MIN_RECALL_FOR_SAVE" \
     --num_workers   "$NUM_WORKERS"  \
     --seed          "$SEED"         \
     2>&1 | tee "$OUTPUT_DIR/training.log"
