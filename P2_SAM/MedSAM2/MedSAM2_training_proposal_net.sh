@@ -51,7 +51,7 @@ DROPOUT=0.10           # Dropout3d probability
 
 # Training
 NUM_EPOCHS=40
-BATCH_SIZE=64           # Reduce to 1 if OOM; full-volume batches are large
+BATCH_SIZE=68           # Reduce to 1 if OOM; full-volume batches are large
 LR=1e-3
 WEIGHT_DECAY=1e-4
 BCE_WEIGHT=0.30        # Recall weight = 1 - BCE_WEIGHT = 0.70

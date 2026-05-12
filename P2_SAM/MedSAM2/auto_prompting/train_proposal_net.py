@@ -161,25 +161,59 @@ class HECKTORProposalDataset(Dataset):
 
 def dice_loss(pred: torch.Tensor, target: torch.Tensor,
               eps: float = 1e-6) -> torch.Tensor:
-    """Soft Dice loss: 1 − 2TP / (2TP + FP + FN).
+    """Per-sample soft Dice loss, averaged over the batch.
 
-    Unlike recall-only loss this penalises false positives, which prevented
-    the model from collapsing to "predict everything = high recall".
+    FIX: The original implementation computed a single Dice over the entire
+    concatenated batch.  For a 64×128×128 crop with ~1 % foreground the
+    gradient was ≈2P/N² ≈10⁻⁹ — effectively zero.  Computing per-sample
+    Dice and averaging gives gradient magnitude O(1/P_sample) which is
+    stable regardless of batch size or tumour fraction.
+
+    Parameters
+    ----------
+    pred   : (B, 1, D, H, W)  sigmoid probabilities in [0, 1]
+    target : (B, 1, D, H, W)  binary ground truth {0, 1}
     """
-    tp = (pred * target).sum()
-    return 1.0 - (2.0 * tp + eps) / (pred.sum() + target.sum() + eps)
+    # Flatten spatial dims; keep batch dim
+    B = pred.shape[0]
+    p = pred.view(B, -1)    # (B, N)
+    t = target.view(B, -1)  # (B, N)
+
+    tp    = (p * t).sum(dim=1)                    # (B,)
+    denom = p.sum(dim=1) + t.sum(dim=1) + eps     # (B,)
+    return (1.0 - (2.0 * tp + eps) / denom).mean()
 
 
 def combined_loss(pred: torch.Tensor,
                   target: torch.Tensor,
                   bce_weight: float = 0.3) -> torch.Tensor:
-    """Dice-biased loss: (1−bce_weight)·Dice + bce_weight·BCE.
+    """Dice-biased loss with dynamically-weighted BCE.
 
-    Dice naturally balances precision and recall (FP and FN hurt equally),
-    while BCE provides stable gradients when predictions are near 0 or 1.
+    FIX: The original unweighted BCE was dominated by the ~99 % background
+    voxels in HECKTOR crops.  Without pos_weight the model collapses to
+    outputting a constant ~0.3 for all voxels, which at the default 0.25
+    metric threshold gives recall=1.000, precision=0.010, DSC=0.020.
+
+    pos_weight = n_neg / n_pos per batch (capped at 100) rebalances the
+    BCE gradient so that a single false-negative costs as much as all false-
+    positives combined — matching the high-recall objective.
+
+    This is equivalent to BCEWithLogitsLoss(pos_weight=...) but applied to
+    already-sigmoid outputs.
     """
-    bce = F.binary_cross_entropy(pred, target)
-    dl  = dice_loss(pred, target)
+    # ── Dynamic positive-class weight ─────────────────────────────────────
+    n_pos = target.sum().clamp(min=1.0)
+    n_neg = (1.0 - target).sum().clamp(min=1.0)
+    pos_weight = (n_neg / n_pos).clamp(max=100.0)
+
+    # Weighted BCE: penalises FN by pos_weight, FP by 1
+    eps = 1e-7
+    bce = -(
+        pos_weight * target       * (pred + eps).log() +
+        (1.0 - target) * (1.0 - pred + eps).log()
+    ).mean()
+
+    dl = dice_loss(pred, target)
     return bce_weight * bce + (1.0 - bce_weight) * dl
 
 
@@ -192,13 +226,21 @@ def compute_metrics(model: nn.Module,
                     loader: DataLoader,
                     device: str,
                     threshold: float = 0.25) -> dict[str, float]:
-    """Compute recall, precision, and Dice on a loader."""
-    recalls, precisions, dices = [], [], []
+    """Compute recall, precision, Dice, and mean predicted probability.
+
+    mean_pred is the key diagnostic for the "predict everything" collapse:
+      - Collapse fingerprint  : mean_pred ≈ 0.3–0.5  with recall=1.000
+      - Healthy training      : mean_pred ≪ 0.5 (proportional to tumour fraction)
+    """
+    recalls, precisions, dices, mean_preds = [], [], [], []
     model.eval()
 
     for x, y in loader:
         x, y = x.to(device), y.to(device)
-        pred = (model(x) > threshold).float()
+        prob = model(x)                             # (B,1,D,H,W) in [0,1]
+        mean_preds.append(prob.mean().item())
+
+        pred = (prob > threshold).float()
         tp = (pred * y).sum().item()
         fp = (pred * (1 - y)).sum().item()
         fn = ((1 - pred) * y).sum().item()
@@ -210,6 +252,7 @@ def compute_metrics(model: nn.Module,
         "recall":    float(np.mean(recalls)),
         "precision": float(np.mean(precisions)),
         "dice":      float(np.mean(dices)),
+        "mean_pred": float(np.mean(mean_preds)),   # NEW: collapse diagnostic
     }
 
 
@@ -236,7 +279,7 @@ def train(args: argparse.Namespace) -> None:
     logger.info("  Epochs       : %d", args.num_epochs)
     logger.info("  Batch size   : %d", args.batch_size)
     logger.info("  LR           : %.2e  (cosine → %.2e)", args.lr, args.lr / 20)
-    logger.info("  Loss weights : BCE=%.2f  Recall=%.2f",
+    logger.info("  Loss weights : BCE=%.2f  Dice=%.2f  (pos_weight dynamic)",
                 args.bce_weight, 1.0 - args.bce_weight)
     logger.info("  Val every    : %d epochs", args.val_every)
     logger.info("  Threshold    : %.2f (for metrics)", args.threshold)
@@ -319,13 +362,17 @@ def train(args: argparse.Namespace) -> None:
 
         if is_val_epoch:
             above_guard = metrics["recall"] >= args.min_recall_for_save
+            # mean_pred diagnostic: values near 0.3–0.5 indicate collapse
+            mp = metrics["mean_pred"]
+            collapse_flag = " [COLLAPSE? mean_pred too high]" if mp > 0.3 else ""
             logger.info(
-                "Ep %3d/%d  loss=%.4f  rec=%.3f%s  prec=%.3f  dice=%.3f  "
-                "lr=%.2e  %.1fs%s",
+                "Ep %3d/%d  loss=%.4f  rec=%.3f%s  prec=%.3f  dice=%.3f"
+                "  mean_pred=%.3f%s  lr=%.2e  %.1fs%s",
                 epoch, args.num_epochs, loss_meter.avg,
                 metrics["recall"],
                 "" if above_guard else f" [< guard {args.min_recall_for_save:.2f}]",
                 metrics["precision"], metrics["dice"],
+                mp, collapse_flag,
                 lr_now, elapsed, "  ★ best" if is_best else "",
             )
         else:
@@ -335,8 +382,9 @@ def train(args: argparse.Namespace) -> None:
         if is_best:
             best_dice = metrics["dice"]
             _save_ckpt(model, best_path, epoch, metrics)
-            logger.info("  Saved best → %s  (dice=%.3f  rec=%.3f)",
-                        best_path, best_dice, metrics["recall"])
+            logger.info("  Saved best → %s  (dice=%.3f  rec=%.3f  mean_pred=%.3f)",
+                        best_path, best_dice,
+                        metrics["recall"], metrics["mean_pred"])
 
         # ── CSV row ───────────────────────────────────────────────────────
         with open(log_csv, "a", newline="") as f:
@@ -345,6 +393,7 @@ def train(args: argparse.Namespace) -> None:
                 f"{metrics.get('recall',    ''):.4f}" if metrics else "",
                 f"{metrics.get('precision', ''):.4f}" if metrics else "",
                 f"{metrics.get('dice',      ''):.4f}" if metrics else "",
+                f"{metrics.get('mean_pred', ''):.4f}" if metrics else "",
                 f"{lr_now:.2e}",
                 f"{elapsed:.1f}",
                 int(is_best),
@@ -352,7 +401,8 @@ def train(args: argparse.Namespace) -> None:
 
     _save_ckpt(model, last_path, args.num_epochs, {})
     logger.info("Training complete.")
-    logger.info("  Best dice   : %.3f  (recall guard: ≥ %.2f)", best_dice, args.min_recall_for_save)
+    logger.info("  Best dice   : %.3f  (recall guard: ≥ %.2f)", 
+                best_dice, args.min_recall_for_save)
     logger.info("  Best ckpt   : %s",   best_path)
     logger.info("  Last ckpt   : %s",   last_path)
     logger.info("  Training log: %s",   log_csv)
