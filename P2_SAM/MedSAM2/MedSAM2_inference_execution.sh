@@ -132,10 +132,16 @@ if [ "$SKIP_GT" -eq 0 ]; then
     #     --bbox_mode gt --bbox_shift 0 --slice_pad 0 \
     #     --save_nifti
     
-    # 1d  Val reduced — negative padding (DSC ceiling with exact GT boxes)
-    run_infer "gt_val_reduced" \
+    # # 1d  Val reduced — negative padding (DSC ceiling with exact GT boxes)
+    # run_infer "gt_val_reduced" \
+    #     --imgs_path "$NPZ_VAL" \
+    #     --bbox_mode gt --bbox_shift -5 --slice_pad -1 \
+    #     --save_nifti
+    
+    # 1e Val extra reduced — more aggressive negative padding (DSC ceiling with exact GT boxes)
+    run_infer "gt_val_extra_reduced" \
         --imgs_path "$NPZ_VAL" \
-        --bbox_mode gt --bbox_shift -5 --slice_pad -1 \
+        --bbox_mode gt --bbox_shift -10 --slice_pad -2 \
         --save_nifti
 fi
 
