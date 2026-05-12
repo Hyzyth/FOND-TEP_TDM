@@ -19,14 +19,34 @@
 set -e
 
 # =============================================================================
-# STEP 0 — Environment setup (assumes medsam2_env already built by dataset_building.sh)
+# STEP 0 — Environment setup (uv + venv + requirements)
 # =============================================================================
 
+if ! command -v uv &> /dev/null; then
+    echo "uv not found — installing..."
+    wget -qO- https://astral.sh/uv/install.sh | sh
+    source "$HOME/.local/bin/env"
+fi
+
+uv python install 3.10
+
 if [ ! -d "medsam2_env" ]; then
-    echo "medsam2_env not found. Run MedSAM2_dataset_building.sh first."
+    uv venv medsam2_env --python 3.10
+fi
+
+source medsam2_env/bin/activate
+
+if [ -f requirements.txt ]; then
+    uv pip install -r requirements.txt
+else
+    echo "requirements.txt not found! Aborting."
     exit 1
 fi
-source medsam2_env/bin/activate
+
+# Install the package itself in editable mode if not already done
+if ! python -c "import sam2" &>/dev/null; then
+    pip install -e . --no-build-isolation
+fi
 
 # =============================================================================
 # STEP 1 — Path configuration
@@ -34,78 +54,79 @@ source medsam2_env/bin/activate
 
 NPZ_DIR=/data/ethan/MedSAM2/hecktor_npz
 RUNS_ROOT=/data/ethan/MedSAM2/runs
-CONFIG="sam2/configs/sam2.1_hiera_tiny_hecktor.yaml"
-
-# Short name used as the --logdir argument.
-# Actual output path: /data/ethan/MedSAM2/runs/$MODEL_DIR/
-MODEL_DIR=ethan_hecktor_hiera_tiny
-
-mkdir -p "$RUNS_ROOT/$MODEL_DIR"
 ln -sfn "$RUNS_ROOT" ./runs
+
+# =============================================================================
+# STEP 2A — Quick debug run (2 epochs) [COMMENTED OUT]
+# =============================================================================
+# CONFIG_DEBUG="configs/sam2.1_hiera_tiny_hecktor_debug.yaml"
+# MODEL_DIR="ethan_debug_run"
+# mkdir -p "$RUNS_ROOT/$MODEL_DIR"
+# echo "========================================"
+# echo "  MedSAM2 × HECKTOR — debug"
+# echo "  Data    : $NPZ_DIR"
+# echo "  Config  : $CONFIG_DEBUG"
+# echo "  Outputs : $RUNS_ROOT/$MODEL_DIR/"
+# echo "  GPU     : $CUDA_VISIBLE_DEVICES"
+# echo "========================================"
+#
+# CUDA_VISIBLE_DEVICES=0 \
+# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+# python3.10 -u -m training.train \
+#     --config "$CONFIG_DEBUG" \
+#     --dataset-path "$NPZ_DIR/train" \
+#     --output-path "$RUNS_ROOT/$MODEL_DIR" \
+#     2>&1 | tee "$RUNS_ROOT/$MODEL_DIR/training_debug.log"
+
+# =============================================================================
+# STEP 2B — Full training from scratch [COMMENTED OUT]
+# Starts from: sam2.1_hiera_tiny.pt
+# =============================================================================
+# CONFIG_SCRATCH="configs/sam2.1_hiera_tiny_hecktor_scratch.yaml"
+# MODEL_DIR="ethan_hecktor_scratch"
+# mkdir -p "$RUNS_ROOT/$MODEL_DIR"
+# echo "========================================"
+# echo "  MedSAM2 × HECKTOR — training from scratch"
+# echo "  Data    : $NPZ_DIR"
+# echo "  Config  : $CONFIG_SCRATCH"
+# echo "  Outputs : $RUNS_ROOT/$MODEL_DIR/"
+# echo "  GPU     : $CUDA_VISIBLE_DEVICES"
+# echo "========================================"
+#
+# CUDA_VISIBLE_DEVICES=0 \
+# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+# python3.10 -u -m training.train \
+#     --config "$CONFIG_SCRATCH" \
+#     --dataset-path "$NPZ_DIR/train" \
+#     --output-path "$RUNS_ROOT/$MODEL_DIR" \
+#     2>&1 | tee "$RUNS_ROOT/$MODEL_DIR/training_scratch.log"
+
+# =============================================================================
+# STEP 2C — Fine-Tuning [ACTIVE]
+# Starts from: MedSAM2_latest.pt
+# =============================================================================
+CONFIG_FINETUNE="configs/sam2.1_hiera_tiny_hecktor_finetune.yaml"
+MODEL_DIR="ethan_hecktor_finetuned"
+mkdir -p "$RUNS_ROOT/$MODEL_DIR"
 
 echo "========================================"
 echo "  MedSAM2 × HECKTOR — Fine-tuning"
 echo "  Data    : $NPZ_DIR"
-echo "  Config  : $CONFIG"
+echo "  Config  : $CONFIG_FINETUNE"
 echo "  Outputs : $RUNS_ROOT/$MODEL_DIR/"
-echo "  GPU     : $CUDA_VISIBLE_DEVICES"
 echo "========================================"
-
-# =============================================================================
-# STEP 2A — Quick debug run (2 epochs, no caching)  [UNCOMMENT TO TEST PIPELINE]
-#
-# Use this before committing to a full run to verify the pipeline is intact.
-# =============================================================================
-
-# CUDA_VISIBLE_DEVICES=0 python3.10 -u training/train.py \
-#     --config  $CONFIG \
-#     dataset.train_folder="$NPZ_DIR/train" \
-#     dataset.val_folder="$NPZ_DIR/val" \
-#     scratch.num_epochs=2 \
-#     scratch.train_video_batch_size=1 \
-#     launcher.experiment_log_dir="$RUNS_ROOT/ethan_debug" \
-#     2>&1 | tee "$RUNS_ROOT/ethan_debug/debug_run.log"
-
-# =============================================================================
-# STEP 2B — Full training from scratch  [ACTIVE]
-#
-# Parameter notes:
-#   $CONFIG : HECKTOR-specific config (HECKTORNPZRawDataset,
-#                               max_num_objects=2, num_frames=8)
-#   batch_size 2              : 512px x 3ch x bfloat16 — raise to 4 if VRAM allows
-#   num_epochs 75             : adjust to your compute budget
-#   base_lr 5e-5              : cosine decay to 5e-6
-#   vision_lr 3e-5            : lower LR for the frozen-then-unfrozen image encoder
-# =============================================================================
 
 CUDA_VISIBLE_DEVICES=0 \
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-python3.10 -u training/train.py \
-    --config  $CONFIG \
-    dataset.train_folder="$NPZ_DIR/train" \
-    dataset.val_folder="$NPZ_DIR/val" \
-    launcher.experiment_log_dir="$RUNS_ROOT/$MODEL_DIR" \
-    2>&1 | tee "$RUNS_ROOT/$MODEL_DIR/training_from_scratch.log"
+python3.10 -u -m training.train \
+    --config "$CONFIG_FINETUNE" \
+    --dataset-path "$NPZ_DIR/train" \
+    --output-path "$RUNS_ROOT/$MODEL_DIR" \
+    2>&1 | tee "$RUNS_ROOT/$MODEL_DIR/training_finetune.log"
+
 
 # =============================================================================
-# STEP 2C — Resume from checkpoint  [UNCOMMENT IF NEEDED]
-#
-# Adjust --resume to point to the desired checkpoint.
-# =============================================================================
-
-# CUDA_VISIBLE_DEVICES=0 \
-# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-# python3.10 -u training/train.py \
-#     --config  $CONFIG \
-#     dataset.train_folder="$NPZ_DIR/train" \
-#     dataset.val_folder="$NPZ_DIR/val" \
-#     launcher.experiment_log_dir="$RUNS_ROOT/$MODEL_DIR" \
-#     trainer.resume_from="$RUNS_ROOT/$MODEL_DIR/checkpoints/checkpoint_last.pth" \
-#     2>&1 | tee "$RUNS_ROOT/$MODEL_DIR/training_resume.log"
-
-# =============================================================================
-# STEP 3 — Copy best checkpoint to the shared checkpoints directory
-#          so the inference script can find it at ./checkpoints/MedSAM2_latest.pt
+# STEP 3 — Copy best checkpoint
 # =============================================================================
 
 BEST_CKPT=$(ls -t "$RUNS_ROOT/$MODEL_DIR/checkpoints/"*.pth 2>/dev/null | head -1)
