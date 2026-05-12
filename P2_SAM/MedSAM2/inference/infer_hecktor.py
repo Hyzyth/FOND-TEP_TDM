@@ -373,7 +373,6 @@ def infer_one_npz(
             slice_pad=slice_pad,
             planar_pad=bbox_shift,
             label_values=(LABEL_GTVp, LABEL_GTVn),
-            min_voxels_for_shrink=args.min_voxels_for_shrink,
         )
     else:
         if auto_prompter is None:
@@ -617,10 +616,6 @@ if __name__ == "__main__":
                    help="Path to Small3DUNet .pt checkpoint "
                         "(required for 'unet'/'hybrid').")
     p.add_argument("--prob_threshold", type=float, default=0.25,
-                    help="UNet probability threshold (recall-biased default 0.25).")
-    p.add_argument("--min_voxels_for_shrink", type=int, default=500,
-                    help="Components with fewer voxels than this are never shrunk "
-                         "by negative padding (slice_pad / bbox_shift < 0). "
-                         "Prevents empty bboxes on small lesions. Default: 500.")
+                   help="UNet probability threshold (recall-biased default 0.25).")
 
     main(p.parse_args())
