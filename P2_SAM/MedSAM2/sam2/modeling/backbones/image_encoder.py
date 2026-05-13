@@ -1,8 +1,8 @@
-"""
-sam2/modeling/backbones/image_encoder.py
-=========================================
-ImageEncoder (trunk + FPN neck) and related layers for SAM2.
-"""
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
 
 from typing import List, Optional
 from collections import OrderedDict
@@ -12,9 +12,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+# From https://github.com/facebookresearch/detectron2/blob/main/detectron2/layers/batch_norm.py # noqa
+# Itself from https://github.com/facebookresearch/ConvNeXt/blob/d1fa8f6fef0a165b27399986cc2bdacc92777e40/models/convnext.py#L119  # noqa
 class LayerNorm2d(nn.Module):
-    """Channel-first Layer Normalisation for (B, C, H, W) tensors."""
-
     def __init__(self, num_channels: int, eps: float = 1e-6) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.ones(num_channels))
@@ -25,61 +25,46 @@ class LayerNorm2d(nn.Module):
         u = x.mean(1, keepdim=True)
         s = (x - u).pow(2).mean(1, keepdim=True)
         x = (x - u) / torch.sqrt(s + self.eps)
-        return self.weight[:, None, None] * x + self.bias[:, None, None]
+        x = self.weight[:, None, None] * x + self.bias[:, None, None]
+        return x
 
 
 class ImageEncoder(nn.Module):
-    """Backbone image encoder: trunk → FPN neck → optional scalp.
-
-    Parameters
-    ----------
-    trunk : nn.Module   Hiera backbone
-    neck  : nn.Module   FPN neck
-    scalp : int         Drop this many finest FPN levels (0 = keep all)
-    """
-
-    def __init__(self, trunk: nn.Module, neck: nn.Module, scalp: int = 0) -> None:
+    def __init__(
+        self,
+        trunk: nn.Module,
+        neck: nn.Module,
+        scalp: int = 0,
+    ):
         super().__init__()
         self.trunk = trunk
         self.neck = neck
         self.scalp = scalp
-        assert self.trunk.channel_list == self.neck.backbone_channel_list, (
-            f"Channel mismatch: trunk {self.trunk.channel_list} vs neck {self.neck.backbone_channel_list}"
-        )
+        assert (
+            self.trunk.channel_list == self.neck.backbone_channel_list
+        ), f"Channel dims of trunk and neck do not match. Trunk: {self.trunk.channel_list}, neck: {self.neck.backbone_channel_list}"
 
-    def forward(self, sample: torch.Tensor) -> dict:
-        """Return vision features, positional encodings, and FPN maps.
-
-        Parameters
-        ----------
-        sample : Tensor  (B, 3, H, W)
-
-        Returns
-        -------
-        dict with keys ``vision_features``, ``vision_pos_enc``, ``backbone_fpn``
-        """
+    def forward(self, sample: torch.Tensor):
+        # Forward through backbone
         features, pos = self.neck(self.trunk(sample))
         if self.scalp > 0:
-            features, pos = features[:-self.scalp], pos[:-self.scalp]
-        return {
-            "vision_features": features[-1],
+            # Discard the lowest resolution features
+            features, pos = features[: -self.scalp], pos[: -self.scalp]
+
+        src = features[-1]
+        output = {
+            "vision_features": src,
             "vision_pos_enc": pos,
             "backbone_fpn": features,
         }
+        return output
 
 
 class FpnNeck(nn.Module):
-    """Feature Pyramid Network neck for the Hiera backbone.
-
-    Parameters
-    ----------
-    position_encoding : nn.Module
-    d_model : int            output channel dimension
-    backbone_channel_list : list[int]  backbone output dims (coarse → fine)
-    kernel_size, stride, padding : int  1×1 lateral convolution parameters
-    fpn_interp_model : str   interpolation mode for top-down pathway
-    fuse_type : str          ``'sum'`` or ``'avg'``
-    fpn_top_down_levels : list[int]  which levels receive top-down features
+    """
+    A modified variant of Feature Pyramid Network (FPN) neck
+    (we remove output conv and also do bicubic interpolation similar to ViT
+    pos embed interpolation)
     """
 
     def __init__(
@@ -93,44 +78,139 @@ class FpnNeck(nn.Module):
         fpn_interp_model: str = "bilinear",
         fuse_type: str = "sum",
         fpn_top_down_levels: Optional[List[int]] = None,
-    ) -> None:
+    ):
+        """Initialize the neck
+        :param trunk: the backbone
+        :param position_encoding: the positional encoding to use
+        :param d_model: the dimension of the model
+        :param neck_norm: the normalization to use
+        """
         super().__init__()
         self.position_encoding = position_encoding
+        self.convs = nn.ModuleList()
         self.backbone_channel_list = backbone_channel_list
         self.d_model = d_model
-        self.convs = nn.ModuleList([
-            nn.Sequential(OrderedDict([
-                ("conv", nn.Conv2d(dim, d_model, kernel_size, stride, padding))
-            ]))
-            for dim in backbone_channel_list
-        ])
+        for dim in backbone_channel_list:
+            current = nn.Sequential()
+            current.add_module(
+                "conv",
+                nn.Conv2d(
+                    in_channels=dim,
+                    out_channels=d_model,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                ),
+            )
+
+            self.convs.append(current)
         self.fpn_interp_model = fpn_interp_model
-        assert fuse_type in ("sum", "avg")
+        assert fuse_type in ["sum", "avg"]
         self.fuse_type = fuse_type
-        self.fpn_top_down_levels = (
-            list(fpn_top_down_levels) if fpn_top_down_levels is not None
-            else list(range(len(self.convs)))
-        )
+
+        # levels to have top-down features in its outputs
+        # e.g. if fpn_top_down_levels is [2, 3], then only outputs of level 2 and 3
+        # have top-down propagation, while outputs of level 0 and level 1 have only
+        # lateral features from the same backbone level.
+        if fpn_top_down_levels is None:
+            # default is to have top-down features on all levels
+            fpn_top_down_levels = range(len(self.convs))
+        self.fpn_top_down_levels = list(fpn_top_down_levels)
 
     def forward(self, xs: List[torch.Tensor]):
-        n = len(self.convs)
-        out = [None] * n
-        pos = [None] * n
-        prev = None
-        for i in range(n - 1, -1, -1):
-            lateral = self.convs[n - 1 - i](xs[i])
-            if i in self.fpn_top_down_levels and prev is not None:
-                td = F.interpolate(
-                    prev.float(), scale_factor=2.0,
+
+        out = [None] * len(self.convs)
+        pos = [None] * len(self.convs)
+        assert len(xs) == len(self.convs)
+        # fpn forward pass
+        # see https://github.com/facebookresearch/detectron2/blob/main/detectron2/modeling/backbone/fpn.py
+        prev_features = None
+        # forward in top-down order (from low to high resolution)
+        n = len(self.convs) - 1
+        for i in range(n, -1, -1):
+            x = xs[i]
+            lateral_features = self.convs[n - i](x)
+            if i in self.fpn_top_down_levels and prev_features is not None:
+                top_down_features = F.interpolate(
+                    prev_features.to(dtype=torch.float32),
+                    scale_factor=2.0,
                     mode=self.fpn_interp_model,
-                    align_corners=None if self.fpn_interp_model == "nearest" else False,
+                    align_corners=(
+                        None if self.fpn_interp_model == "nearest" else False
+                    ),
                     antialias=False,
                 )
-                prev = lateral + td
+                prev_features = lateral_features + top_down_features
                 if self.fuse_type == "avg":
-                    prev = prev / 2
+                    prev_features /= 2
             else:
-                prev = lateral
-            out[i] = prev
-            pos[i] = self.position_encoding(prev).to(prev.dtype)
+                prev_features = lateral_features
+            x_out = prev_features
+            out[i] = x_out
+            pos[i] = self.position_encoding(x_out).to(x_out.dtype)
+
+        return out, pos
+
+
+class ViTDetNeck(nn.Module):
+    def __init__(
+        self,
+        position_encoding: nn.Module,
+        d_model: int,
+        backbone_channel_list: List[int],
+        kernel_size: int = 1,
+        stride: int = 1,
+        padding: int = 0,
+        neck_norm=None,
+    ):
+        """Initialize the neck
+
+        :param trunk: the backbone
+        :param position_encoding: the positional encoding to use
+        :param d_model: the dimension of the model
+        :param neck_norm: the normalization to use
+        """
+        super().__init__()
+        self.backbone_channel_list = backbone_channel_list
+        self.position_encoding = position_encoding
+        self.convs = nn.ModuleList()
+        self.d_model = d_model
+        use_bias = neck_norm is None
+        for dim in self.backbone_channel_list:
+            current = nn.Sequential()
+            current.add_module(
+                "conv_1x1",
+                nn.Conv2d(
+                    in_channels=dim,
+                    out_channels=d_model,
+                    kernel_size=1,
+                    bias=use_bias,
+                ),
+            )
+            if neck_norm is not None:
+                current.add_module("norm_0", LayerNorm2d(d_model))
+            current.add_module(
+                "conv_3x3",
+                nn.Conv2d(
+                    in_channels=d_model,
+                    out_channels=d_model,
+                    kernel_size=3,
+                    padding=1,
+                    bias=use_bias,
+                ),
+            )
+            if neck_norm is not None:
+                current.add_module("norm_1", LayerNorm2d(d_model))
+            self.convs.append(current)
+
+    def forward(self, xs: List[torch.Tensor]):
+        out = [None] * len(self.convs)
+        pos = [None] * len(self.convs)
+        assert len(xs) == len(self.convs)
+
+        x = xs[0]
+        x_out = self.convs[0](x)
+        out[0] = x_out
+        pos[0] = self.position_encoding(x_out).to(x_out.dtype)
+
         return out, pos

@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
 training/train.py
 ==================
@@ -44,25 +50,8 @@ from training.utils.train_utils import makedir, register_omegaconf_resolvers
 os.environ["HYDRA_FULL_ERROR"] = "1"
 
 
-def single_proc_run(
-    local_rank: int,
-    main_port: int,
-    cfg,
-    world_size: int,
-    node_rank: int,
-    master_addr: str,
-) -> None:
-    """Single-GPU training process entry point.
-
-    Parameters
-    ----------
-    local_rank : int
-    main_port : int
-    cfg : OmegaConf config
-    world_size : int
-    node_rank : int
-    master_addr : str
-    """
+def single_proc_run(local_rank, main_port, cfg, world_size, node_rank, master_addr):
+    """Single GPU process"""
     os.environ["MASTER_ADDR"] = master_addr
     os.environ["MASTER_PORT"] = str(main_port)
     os.environ["RANK"] = str(node_rank * cfg.launcher.gpus_per_node + local_rank)
@@ -71,146 +60,261 @@ def single_proc_run(
     try:
         register_omegaconf_resolvers()
     except Exception as e:
-        logging.info("OmegaConf resolver already registered: %s", e)
+        logging.info(e)
+
     trainer = instantiate(cfg.trainer, _recursive_=False)
     trainer.run()
 
 
-def single_node_runner(
-    cfg,
-    main_port: int,
-    node_rank: int = 0,
-    master_addr: str = "localhost",
-) -> None:
-    """Spawn one process per GPU on a single node.
-
-    Parameters
-    ----------
-    cfg : OmegaConf config
-    main_port : int
-    node_rank : int
-    master_addr : str
-    """
+def single_node_runner(cfg, main_port: int, node_rank: int = 0, master_addr: str = "localhost"):
     num_proc = cfg.launcher.gpus_per_node
     world_size = cfg.launcher.gpus_per_node * cfg.launcher.num_nodes
-    torch.multiprocessing.set_start_method("spawn")
+    torch.multiprocessing.set_start_method(
+        "spawn"
+    )  # CUDA runtime does not support `fork`
     if num_proc == 1:
-        # Direct call (no spawn) makes debugging with breakpoints easier.
-        single_proc_run(0, main_port, cfg, world_size, node_rank, master_addr)
+        # directly call single_proc so we can easily set breakpoints
+        # mp.spawn does not let us set breakpoints
+        single_proc_run(local_rank=0, main_port=main_port, cfg=cfg, world_size=world_size, node_rank=node_rank, master_addr=master_addr)
     else:
-        torch.multiprocessing.start_processes(
-            single_proc_run,
-            args=(main_port, cfg, world_size, node_rank, master_addr),
-            nprocs=num_proc,
-            start_method="spawn",
-        )
+        mp_runner = torch.multiprocessing.start_processes
+        args = (main_port, cfg, world_size, node_rank, master_addr)
+        mp_runner(single_proc_run, args=args, nprocs=num_proc, start_method="spawn")
 
 
-def _format_exception(e: Exception, limit: int = 20) -> str:
-    tb = "".join(traceback.format_tb(e.__traceback__, limit=limit))
-    return f"{type(e).__name__}: {e}\nTraceback:\n{tb}"
+def format_exception(e: Exception, limit=20):
+    traceback_str = "".join(traceback.format_tb(e.__traceback__, limit=limit))
+    return f"{type(e).__name__}: {e}\nTraceback:\n{traceback_str}"
 
 
 class SubmititRunner(submitit.helpers.Checkpointable):
-    """Wrapper for ``submitit``-based SLURM submission."""
+    """A callable which is passed to submitit to launch the jobs."""
 
-    def __init__(self, port: int, cfg) -> None:
+    def __init__(self, port, cfg):
         self.cfg = cfg
         self.port = port
+        self.has_setup = False
 
-    def __call__(self):
+    def run_trainer(self):
         job_env = submitit.JobEnvironment()
+        # Need to add this again so the hydra.job.set_env PYTHONPATH
+        # is also set when launching jobs.
+        add_pythonpath_to_sys_path()
         os.environ["MASTER_ADDR"] = job_env.hostnames[0]
         os.environ["MASTER_PORT"] = str(self.port)
         os.environ["RANK"] = str(job_env.global_rank)
         os.environ["LOCAL_RANK"] = str(job_env.local_rank)
         os.environ["WORLD_SIZE"] = str(job_env.num_tasks)
+
         register_omegaconf_resolvers()
-        cfg_resolved = OmegaConf.create(OmegaConf.to_container(self.cfg, resolve=False))
+        cfg_resolved = OmegaConf.to_container(self.cfg, resolve=False)
+        cfg_resolved = OmegaConf.create(cfg_resolved)
+
+        trainer = instantiate(cfg_resolved.trainer, _recursive_=False)
+        trainer.run()
+
+    def __call__(self):
+        job_env = submitit.JobEnvironment()
+        self.setup_job_info(job_env.job_id, job_env.global_rank)
         try:
-            instantiate(cfg_resolved.trainer, _recursive_=False).run()
+            self.run_trainer()
         except Exception as e:
-            logging.error(_format_exception(e))
-            raise
+            # Log the exception. Then raise it again (as what SubmititRunner currently does).
+            message = format_exception(e)
+            logging.error(message)
+            raise e
+
+    def setup_job_info(self, job_id, rank):
+        """Set up slurm job info"""
+        self.job_info = {
+            "job_id": job_id,
+            "rank": rank,
+            "cluster": self.cfg.get("cluster", None),
+            "experiment_log_dir": self.cfg.launcher.experiment_log_dir,
+        }
+
+        self.has_setup = True
+
+
+def add_pythonpath_to_sys_path():
+    if "PYTHONPATH" not in os.environ or not os.environ["PYTHONPATH"]:
+        return
+    sys.path = os.environ["PYTHONPATH"].split(":") + sys.path
 
 
 def main(args, cfg) -> None:
-    """Parse launcher settings and either train locally or submit to SLURM."""
+    
     if cfg.launcher.experiment_log_dir is None:
-        cfg.launcher.experiment_log_dir = os.path.join(os.getcwd(), "sam2_logs", args.config)
+        cfg.launcher.experiment_log_dir = os.path.join(
+            os.getcwd(), "sam2_logs", args.config
+        )
 
-    logging.info("Config:\n%s", OmegaConf.to_yaml(cfg))
+    print("###################### Train App Config ####################")
+    print(OmegaConf.to_yaml(cfg))
+    print("############################################################")
+
+    add_pythonpath_to_sys_path()
     makedir(cfg.launcher.experiment_log_dir)
 
-    # Write resolved configs to disk for reproducibility.
-    with g_pathmgr.open(os.path.join(cfg.launcher.experiment_log_dir, "config.yaml"), "w") as f:
-        f.write(OmegaConf.to_yaml(cfg))
-
-    # Apply CLI overrides.
-    if args.num_gpus is not None:
-        cfg.launcher.gpus_per_node = args.num_gpus
-    if args.num_nodes is not None:
-        cfg.launcher.num_nodes = args.num_nodes
-
     submitit_conf = cfg.get("submitit", None)
-    assert submitit_conf is not None, "Missing [submitit] block in config."
+    assert submitit_conf is not None, "Missing submitit config"
 
-    use_cluster = args.use_cluster if args.use_cluster is not None else submitit_conf.use_cluster
+    submitit_dir = os.path.join(cfg.launcher.experiment_log_dir,"submitit_logs",)
+
+    # Apply CLI overrides BEFORE saving configs
+    cfg.launcher.gpus_per_node = (args.num_gpus if args.num_gpus is not None else cfg.launcher.gpus_per_node)
+    cfg.launcher.num_nodes = (args.num_nodes if args.num_nodes is not None else cfg.launcher.num_nodes)
+
+    use_cluster = (args.use_cluster if args.use_cluster is not None else submitit_conf.use_cluster)
+
+    # Save configs AFTER overrides
+    with g_pathmgr.open(
+        os.path.join(cfg.launcher.experiment_log_dir, "config.yaml"), "w") as f:
+            f.write(OmegaConf.to_yaml(cfg))
+
+    cfg_resolved = OmegaConf.to_container(cfg, resolve=False)
+    cfg_resolved = OmegaConf.create(cfg_resolved)
+
+    with g_pathmgr.open(
+        os.path.join(cfg.launcher.experiment_log_dir, "config_resolved.yaml"), "w") as f:
+            f.write(OmegaConf.to_yaml(cfg_resolved, resolve=True))
 
     if use_cluster:
-        _submit_slurm(args, cfg, submitit_conf)
+        executor = submitit.AutoExecutor(folder=submitit_dir)
+        submitit_conf.partition = (args.partition if args.partition is not None else submitit_conf.get("partition", None))
+        submitit_conf.account = (args.account if args.account is not None else submitit_conf.get("account", None))
+        submitit_conf.qos = (args.qos if args.qos is not None else submitit_conf.get("qos", None))
+
+        job_kwargs = {
+            "timeout_min": 60 * submitit_conf.timeout_hour,
+            "name": (submitit_conf.name if hasattr(submitit_conf, "name") else args.config),
+            "slurm_partition": submitit_conf.partition,
+            "gpus_per_node": cfg.launcher.gpus_per_node,
+            "tasks_per_node": cfg.launcher.gpus_per_node,
+            "cpus_per_task": submitit_conf.cpus_per_task,
+            "nodes": cfg.launcher.num_nodes,
+            "slurm_additional_parameters": {
+                "exclude": " ".join(submitit_conf.get("exclude_nodes", [])),
+            }
+        }
+
+        if "include_nodes" in submitit_conf:
+            assert (len(submitit_conf["include_nodes"]) >= cfg.launcher.num_nodes), "Not enough nodes"
+            job_kwargs["slurm_additional_parameters"]["nodelist"] = " ".join(submitit_conf["include_nodes"])
+
+        if submitit_conf.account is not None:
+            job_kwargs["slurm_additional_parameters"]["account"] = (submitit_conf.account)
+
+        if submitit_conf.qos is not None:
+            job_kwargs["slurm_additional_parameters"]["qos"] = (submitit_conf.qos)
+
+        if submitit_conf.get("mem_gb", None) is not None:
+            job_kwargs["mem_gb"] = submitit_conf.mem_gb
+
+        elif submitit_conf.get("mem", None) is not None:
+            job_kwargs["slurm_mem"] = submitit_conf.mem
+
+        if submitit_conf.get("constraints", None) is not None:
+            job_kwargs["slurm_constraint"] = (submitit_conf.constraints)
+
+        if submitit_conf.get("comment", None) is not None:
+            job_kwargs["slurm_comment"] = (submitit_conf.comment)
+
+        # Supports only cpu-bind option within srun_args.
+        if submitit_conf.get("srun_args", None) is not None:
+            job_kwargs["slurm_srun_args"] = []
+
+            if submitit_conf.srun_args.get("cpu_bind", None) is not None:
+                job_kwargs["slurm_srun_args"].extend(
+                    ["--cpu-bind", submitit_conf.srun_args.cpu_bind]
+                )
+
+        print("###################### SLURM Config ####################")
+        print(job_kwargs)
+        print("########################################################")
+
+        executor.update_parameters(**job_kwargs)
+
+        main_port = random.randint(
+            submitit_conf.port_range[0], submitit_conf.port_range[1],
+        )
+        runner = SubmititRunner(main_port, cfg)
+        job = executor.submit(runner)
+        print(f"Submitit Job ID: {job.job_id}")
+        runner.setup_job_info(job.job_id, rank=0)
+
     else:
-        master_addr = args.master_addr or "localhost"
-        main_port = args.main_port or random.randint(*submitit_conf.port_range)
-        node_rank = int(os.environ.get("SLURM_PROCID", 0))
-        single_node_runner(cfg, main_port, node_rank=node_rank, master_addr=master_addr)
-
-
-def _submit_slurm(args, cfg, submitit_conf):
-    """Submit the training job to a SLURM cluster via submitit."""
-    submitit_dir = os.path.join(cfg.launcher.experiment_log_dir, "submitit_logs")
-    executor = submitit.AutoExecutor(folder=submitit_dir)
-    job_kwargs = {
-        "timeout_min": 60 * submitit_conf.timeout_hour,
-        "name": getattr(submitit_conf, "name", args.config),
-        "slurm_partition": submitit_conf.get("partition", None),
-        "gpus_per_node": cfg.launcher.gpus_per_node,
-        "tasks_per_node": cfg.launcher.gpus_per_node,
-        "cpus_per_task": submitit_conf.cpus_per_task,
-        "nodes": cfg.launcher.num_nodes,
-    }
-    executor.update_parameters(**{k: v for k, v in job_kwargs.items() if v is not None})
-    main_port = random.randint(*submitit_conf.port_range)
-    job = executor.submit(SubmititRunner(main_port, cfg))
-    logging.info("Submitit job ID: %s", job.job_id)
+        master_addr = (args.master_addr if args.master_addr else "localhost")
+        main_port = (args.main_port if args.main_port else random.randint(
+                submitit_conf.port_range[0], submitit_conf.port_range[1],
+            )
+        )
+        if "SLURM_PROCID" in os.environ:
+            node_rank = int(os.environ["SLURM_PROCID"])
+        else:
+            node_rank = 0
+        single_node_runner(cfg, main_port, node_rank=node_rank, master_addr=master_addr,)
 
 
 if __name__ == "__main__":
+
     initialize_config_module("sam2", version_base="1.2")
-
-    parser = ArgumentParser(description="Train MedSAM2 on HECKTOR or other medical datasets.")
-    parser.add_argument("-c", "--config", required=True, type=str,
-                        help="Hydra config name (e.g. sam2/configs/sam2.1_hiera_tiny_hecktor.yaml).")
-    parser.add_argument("--use-cluster", type=int, default=None,
-                        help="0 = local, 1 = SLURM cluster.")
-    parser.add_argument("--partition", type=str, default=None)
-    parser.add_argument("--num-gpus", type=int, default=None)
-    parser.add_argument("--num-nodes", type=int, default=None)
-    parser.add_argument("--master-addr", type=str, default=None)
-    parser.add_argument("--main-port", type=int, default=None)
-    parser.add_argument("--dataset-path", type=str, default=None,
-                        help="Overrides cfg.dataset.train_folder.")
-    parser.add_argument("--output-path", type=str, default=None,
-                        help="Overrides cfg.launcher.experiment_log_dir.")
-
+    parser = ArgumentParser(
+        description="Train MedSAM2 on HECKTOR or other medical datasets."
+    )
+    parser.add_argument(
+        "-c", "--config", required=True, type=str,
+        help="Hydra config name (e.g. sam2/configs/sam2.1_hiera_tiny_hecktor.yaml)."
+    )
+    parser.add_argument(
+        "--use-cluster", type=int, default=None,
+        help="0 = local, 1 = SLURM cluster.",
+    )
+    parser.add_argument(
+        "--partition", type=str, default=None,
+        help="SLURM partition",
+    )
+    parser.add_argument(
+        "--account", type=str, default=None,
+        help="SLURM account",
+    )
+    parser.add_argument(
+        "--qos", type=str, default=None,
+        help="SLURM qos",
+    )
+    parser.add_argument(
+        "--num-gpus", type=int, default=None,
+        help="Number of GPUs per node",
+    )
+    parser.add_argument(
+        "--num-nodes", type=int, default=None,
+        help="Number of nodes",
+    )
+    parser.add_argument(
+        "--master-addr", type=str, default=None,
+        help="Master node address",
+    )
+    parser.add_argument(
+        "--main-port", type=int, default=None,
+        help="Main communication port",
+    )
+    parser.add_argument(
+        "--dataset-path", type=str, default=None,
+        help="Overrides cfg.dataset.train_folder.",
+    )
+    parser.add_argument(
+        "--output-path", type=str, default=None,
+        help="Overrides cfg.launcher.experiment_log_dir.",
+    )
     args = parser.parse_args()
-    args.use_cluster = bool(args.use_cluster) if args.use_cluster is not None else None
-
+    args.use_cluster = (bool(args.use_cluster) if args.use_cluster is not None else None)
     register_omegaconf_resolvers()
     cfg = compose(config_name=args.config)
 
+    # Dataset override
     if args.dataset_path is not None:
         cfg.dataset.train_folder = args.dataset_path
+    # Output override
     if args.output_path is not None:
         cfg.launcher.experiment_log_dir = args.output_path
 
