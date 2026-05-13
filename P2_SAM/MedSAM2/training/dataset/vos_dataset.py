@@ -95,9 +95,17 @@ class VOSDataset(VisionDataset):
 
         images = []
         rgb_images = load_images(sampled_frames)
+        
         # Iterate over the sampled frames and store their rgb data and object data (bbox, segment)
         for frame_idx, frame in enumerate(sampled_frames):
-            w, h = rgb_images[frame_idx].size
+            img_data = rgb_images[frame_idx]
+            
+            # Handle both PyTorch Tensors and PIL Images
+            if isinstance(img_data, torch.Tensor):
+                _, h, w = img_data.shape  # Tensor is (C, H, W)
+            else:
+                w, h = img_data.size      # PIL Image is (W, H)
+                
             images.append(
                 Frame(
                     data=rgb_images[frame_idx],

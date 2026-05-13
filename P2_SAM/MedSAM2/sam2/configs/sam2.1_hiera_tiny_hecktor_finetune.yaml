@@ -19,10 +19,10 @@ scratch:
   num_train_workers: 8
   num_frames: 8                   # Axial slices sampled per training clip
   max_num_objects: 2              # GTVp (1) + GTVn (2)
-  base_lr: 5.0e-5
-  vision_lr: 3.0e-5
+  base_lr: 1.0e-4
+  vision_lr: 1.0e-4
   phases_per_epoch: 1
-  num_epochs: 300                 # Full training
+  num_epochs: 1900                 # Full training
 
 # ---------------------------------------------------------------------------
 # Dataset paths
@@ -53,9 +53,9 @@ vos:
         # Mild colour jitter – CT/PET intensities are already normalised
         - _target_: training.dataset.transforms.ColorJitter
           consistent_transform: True
-          brightness: 0.05
-          contrast: 0.05
-          saturation: 0.02
+          brightness: 0.1
+          contrast: 0.1
+          saturation: 0.05
           hue: null
         - _target_: training.dataset.transforms.NormalizeAPI
           mean: [0.485, 0.456, 0.406]
@@ -258,11 +258,11 @@ trainer:
         - scheduler:
             _target_: fvcore.common.param_scheduler.CosineParamScheduler
             start_value: ${scratch.base_lr}
-            end_value: ${divide:${scratch.base_lr},10}
+            end_value: ${divide:${scratch.base_lr},50}
         - scheduler:
             _target_: fvcore.common.param_scheduler.CosineParamScheduler
             start_value: ${scratch.vision_lr}
-            end_value: ${divide:${scratch.vision_lr},10}
+            end_value: ${divide:${scratch.vision_lr},30}
           param_names:
             - 'image_encoder.*'
       weight_decay:

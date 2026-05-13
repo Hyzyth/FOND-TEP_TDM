@@ -57,7 +57,7 @@ for candidate in [_HERE, _HERE.parent]:
         break
 
 from auto_prompting.pet_proposal import (
-    get_pet_proposals, reconstruct_suv,
+    get_pet_proposals, reconstruct_suv, mask_to_proposals,
     base41_mask, nestle_mask, black_mask, daisne_mask,
 )
 from auto_prompting.auto_prompter import AutoPrompter
@@ -68,49 +68,14 @@ from auto_prompting.auto_prompter import AutoPrompter
 
 # Each entry: (label_for_figure, method_kwargs_dict)
 PET_SWEEPS = {
-    "base41": [
-        (f"pct={p:.2f}", {"pct": p})
-        for p in [0.20, 0.25, 0.30, 0.35, 0.41, 0.45, 0.50, 0.55, 0.60]
-    ],
-    "nestle": [
-        (f"alpha={a:.2f}", {"alpha": a})
-        for a in [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
-    ],
-    "black": [
-        (f"α={ab[0]:.3f} β={ab[1]:.3f}", {"alpha": ab[0], "beta": ab[1]})
-        for ab in [
-            (0.200, 0.400),
-            (0.250, 0.500),
-            (0.307, 0.588),   # published default
-            (0.307, 0.700),
-            (0.350, 0.600),
-            (0.350, 0.700),
-        ]
-    ],
-    "daisne": [
-        (f"a={ab[0]:.1f} b={ab[1]:.1f}", {"a": ab[0], "b": ab[1]})
-        for ab in [
-            (25.0, 60.0),
-            (28.0, 70.0),
-            (31.3, 77.7),   # published default
-            (35.0, 85.0),
-            (40.0, 90.0),
-            (45.0, 100.0),
-        ]
-    ],
+    "base41": [(f"pct={p:.2f}", {"pct": p}) for p in [0.20, 0.30, 0.41, 0.50, 0.60]],
+    "nestle": [(f"alpha={a:.2f}", {"alpha": a}) for a in [0.05, 0.15, 0.25, 0.30]],
+    "black":  [(f"α={ab[0]:.3f} β={ab[1]:.3f}", {"alpha": ab[0], "beta": ab[1]}) for ab in [(0.250, 0.500), (0.307, 0.588), (0.350, 0.700)]],
+    "daisne": [(f"a={ab[0]:.1f} b={ab[1]:.1f}", {"a": ab[0], "b": ab[1]}) for ab in [(25.0, 60.0), (31.3, 77.7), (40.0, 90.0)]],
 }
+UNET_THRESHOLDS = [0.02, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95]
 
-# Dense threshold grid for the proposal network
-UNET_THRESHOLDS = [0.02, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35,
-                   0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95]
-
-# Color per method (for bounding boxes)
-METHOD_COLORS = {
-    "base41": "gold",
-    "nestle": "deepskyblue",
-    "black":  "tomato",
-    "daisne": "limegreen",
-}
+METHOD_COLORS = {"base41": "gold", "nestle": "deepskyblue", "black": "tomato", "daisne": "limegreen"}
 GT_COLORS = {1: (1.0, 0.2, 0.2), 2: (0.2, 0.6, 1.0)}
 
 
@@ -128,31 +93,14 @@ def load_npz(path: Path) -> dict:
     }
 
 
-def draw_boxes(ax, proposals: list, color: str, lw: float = 1.5) -> None:
-    for p in proposals:
-        x0, y0, x1, y1 = p["bbox_2d"]
-        ax.add_patch(mpatches.FancyBboxPatch(
-            (x0, y0), x1 - x0, y1 - y0,
-            boxstyle="square,pad=0", linewidth=lw,
-            edgecolor=color, facecolor="none", alpha=0.9,
-        ))
-        ax.text(x0, y0 - 2, f"#{p['component_id']} {p['voxel_count']:,}v",
-                color=color, fontsize=5, va="bottom")
-
-
-def gt_overlay(ax, gts_slice: np.ndarray, alpha: float = 0.45) -> None:
+def gt_overlay(ax, gts_slice: np.ndarray, alpha: float = 0.35) -> None:
     for label_id, rgb in GT_COLORS.items():
         m = (gts_slice == label_id).astype(np.float32)
-        if m.sum() == 0:
-            continue
+        if m.sum() == 0: continue
         rgba = np.zeros((*m.shape, 4), dtype=np.float32)
         rgba[..., :3] = rgb
         rgba[..., 3] = m * alpha
         ax.imshow(rgba, interpolation="nearest")
-
-
-def best_z(proposals: list, D: int) -> int:
-    return proposals[0]["z_mid"] if proposals else D // 2
 
 
 def _dark_ax(ax):
@@ -160,83 +108,85 @@ def _dark_ax(ax):
     ax.axis("off")
 
 
+def plot_tumor_sequence(fig, grid, row, col_base, ct, gts, mask_vol, p, color):
+    """Plots Min Z, Mid Z, and Max Z for a given tumor proposal dict."""
+    z0, z1, y0, y1, x0, x1 = p["bbox_3d"]
+    z_mid = p["z_mid"]
+    z_max = max(z0, z1 - 1)
+
+    slices = [(z0, f"Min Z: {z0}"), (z_mid, f"Mid Z: {z_mid}"), (z_max, f"Max Z: {z_max}")]
+    edge_color = color if isinstance(color, str) else plt.cm.colors.to_hex(color)
+
+    for s_idx, (z, title) in enumerate(slices):
+        ax = fig.add_subplot(grid[row, col_base + s_idx])
+        _dark_ax(ax)
+        ax.imshow(ct[z], cmap="gray", interpolation="nearest")
+        gt_overlay(ax, gts[z])
+
+        if mask_vol is not None:
+            m2d = mask_vol[z]
+            ov = np.zeros((*m2d.shape, 4), dtype=np.float32)
+            try:
+                rgb = plt.cm.colors.to_rgb(color)
+            except Exception:
+                rgb = [1.0, 0.8, 0.0]
+            ov[m2d > 0, :3] = rgb
+            ov[m2d > 0, 3] = 0.45
+            ax.imshow(ov, interpolation="nearest")
+
+        w, h = x1 - x0, y1 - y0
+        ax.add_patch(mpatches.FancyBboxPatch(
+            (x0, y0), w, h, boxstyle="square,pad=0",
+            linewidth=1.5, edgecolor=edge_color, facecolor="none", alpha=0.9
+        ))
+
+        vc = p.get("voxel_count", 0)
+        cid = p.get("component_id", "?")
+        full_title = f"#{cid} ({vc:,}v)\n{title}" if s_idx == 1 else title
+        ax.set_title(full_title, color="white", fontsize=8)
+
+
 # ---------------------------------------------------------------------------
-# A) PET parameter sweep — one figure per method
+# A) PET parameter sweep
 # ---------------------------------------------------------------------------
 
-def make_pet_sweep_figure(patient_id: str, data: dict,
-                           method: str, args: argparse.Namespace) -> plt.Figure:
-    ct   = data["ct_imgs"]
-    pet  = data["pet_imgs"]
-    gts  = data["gts"]
-    smx  = data["suv_max"]
-    D    = ct.shape[0]
-
+def make_pet_sweep_figure(patient_id: str, data: dict, method: str, args: argparse.Namespace) -> plt.Figure:
+    ct, pet, gts, smx = data["ct_imgs"], data["pet_imgs"], data["gts"], data["suv_max"]
     variants = PET_SWEEPS[method]
-    n_rows   = len(variants)
-    color    = METHOD_COLORS[method]
+    color = METHOD_COLORS[method]
 
-    # Pre-compute SUV once for SUV-based methods
-    suv = None
-    if method != "base41" and smx is not None:
-        suv = reconstruct_suv(pet, smx)
+    suv = reconstruct_suv(pet, smx) if (method != "base41" and smx is not None) else None
 
-    fig, axes = plt.subplots(n_rows, 3,
-                             figsize=(12, n_rows * 3.0),
-                             constrained_layout=True)
-    if n_rows == 1:
-        axes = axes[np.newaxis, :]
+    # Pre-compute to determine max tumors for grid sizing
+    sweep_data = []
+    max_tumors = 1
+    for label, kwargs in variants:
+        if method == "base41": mask_vol = base41_mask(pet, **kwargs)
+        elif method == "nestle": mask_vol = nestle_mask(suv, **kwargs)
+        elif method == "black": mask_vol = black_mask(suv, **kwargs)
+        else: mask_vol = daisne_mask(suv, **kwargs)
+
+        props = get_pet_proposals(pet, smx, method, slice_pad=args.slice_pad, planar_pad=args.planar_pad, **kwargs)
+        max_tumors = max(max_tumors, len(props))
+        sweep_data.append((label, mask_vol, props))
+
+    max_tumors = min(max_tumors, 4) # Cap width
+    slices_per_tumor = 3
+    n_rows = len(variants)
+    n_cols = 1 + (max_tumors * slices_per_tumor)
+
+    fig = plt.figure(figsize=(max(8, n_cols * 2.5), n_rows * 3.0), constrained_layout=True)
     fig.patch.set_facecolor("#111111")
-    suv_txt = f"{smx:.2f}" if smx else "N/A"
-    fig.suptitle(f"{method} sweep — {patient_id}  |  suv_max={suv_txt}",
-                 color="white", fontsize=10)
+    fig.suptitle(f"{method} sweep — {patient_id} | suv_max={smx:.2f}" if smx else f"{method} sweep — {patient_id}", color="white", fontsize=11)
+    grid = fig.add_gridspec(n_rows, n_cols, wspace=0.05, hspace=0.3)
 
-    for row, (label, kwargs) in enumerate(variants):
-        # Compute thresholded mask for visualisation
-        if method == "base41":
-            mask_vol = base41_mask(pet, **kwargs)
-        elif suv is None:
-            mask_vol = base41_mask(pet)   # fallback if suv unavailable
-        elif method == "nestle":
-            mask_vol = nestle_mask(suv, **kwargs)
-        elif method == "black":
-            mask_vol = black_mask(suv, **kwargs)
-        else:  # daisne
-            mask_vol = daisne_mask(suv, **kwargs)
+    for row, (label, mask_vol, props) in enumerate(sweep_data):
+        ax_info = fig.add_subplot(grid[row, 0])
+        _dark_ax(ax_info)
+        ax_info.text(0.5, 0.5, f"{label}\n\n{len(props)} tumors", color=color, ha="center", va="center", fontsize=9, fontweight="bold")
 
-        props = get_pet_proposals(
-            pet_uint8  = pet,
-            suv_max    = smx,
-            method     = method,
-            slice_pad  = args.slice_pad,
-            planar_pad = args.planar_pad,
-            **kwargs,
-        )
-        z = best_z(props, D)
-
-        ax_ct, ax_pet, ax_mask = axes[row]
-        for ax in (ax_ct, ax_pet, ax_mask):
-            _dark_ax(ax)
-
-        ax_ct.imshow(ct[z], cmap="gray", interpolation="nearest")
-        gt_overlay(ax_ct, gts[z])
-        ax_ct.set_title(f"{label}  |  z={z}", color="white", fontsize=7)
-
-        ax_pet.imshow(pet[z], cmap="hot", interpolation="nearest")
-        ax_pet.set_title("PET", color="white", fontsize=7)
-
-        # Mask overlay + boxes
-        ax_mask.imshow(ct[z], cmap="gray", interpolation="nearest")
-        m2d = mask_vol[z]
-        ov = np.zeros((*m2d.shape, 4), dtype=np.float32)
-        try:
-            ov[m2d, :3] = plt.cm.colors.to_rgb(color)
-        except Exception:
-            ov[m2d, :3] = [1.0, 0.8, 0.0]
-        ov[m2d, 3] = 0.45
-        ax_mask.imshow(ov, interpolation="nearest")
-        draw_boxes(ax_mask, [p for p in props if p["z_mid"] == z], color)
-        ax_mask.set_title(f"{len(props)} proposals", color="white", fontsize=7)
+        for t_idx, p in enumerate(props[:max_tumors]):
+            plot_tumor_sequence(fig, grid, row, 1 + t_idx * slices_per_tumor, ct, gts, mask_vol, p, color)
 
     return fig
 
@@ -245,109 +195,72 @@ def make_pet_sweep_figure(patient_id: str, data: dict,
 # B) Proposal network — dense threshold sweep
 # ---------------------------------------------------------------------------
 
-def make_net_sweep_figure(patient_id: str, data: dict,
-                           model, device: str,
-                           args: argparse.Namespace) -> plt.Figure:
-    ct  = data["ct_imgs"]
-    pet = data["pet_imgs"]
-    gts = data["gts"]
+def make_net_sweep_figure(patient_id: str, data: dict, model, device: str, args: argparse.Namespace) -> plt.Figure:
+    ct, pet, gts = data["ct_imgs"], data["pet_imgs"], data["gts"]
 
-    x = torch.tensor(
-        np.stack([ct.astype(np.float32) / 255.0,
-                  pet.astype(np.float32) / 255.0], axis=0)
-    ).unsqueeze(0).float().to(device)
-
-    # --- FIX: Pad to multiple of 16 ---
+    x = torch.tensor(np.stack([ct.astype(np.float32)/255., pet.astype(np.float32)/255.], axis=0)).unsqueeze(0).float().to(device)
     _, _, D, H, W = x.shape
-    pad_d = (16 - (D % 16)) % 16
-    pad_h = (16 - (H % 16)) % 16
-    pad_w = (16 - (W % 16)) % 16
-    
-    # F.pad format: (pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back)
+    pad_d, pad_h, pad_w = (16 - (D%16))%16, (16 - (H%16))%16, (16 - (W%16))%16
     x = F.pad(x, (0, pad_w, 0, pad_h, 0, pad_d))
 
     model.eval()
     with torch.no_grad():
-        # Run model and crop back to original (D, H, W)
         prob = model(x)[0, 0, :D, :H, :W].cpu().numpy()
 
-    thresholds = UNET_THRESHOLDS
-    n_rows = len(thresholds)
+    sweep_data, max_tumors = [], 1
+    for thr in UNET_THRESHOLDS:
+        props = mask_to_proposals(prob > thr, slice_pad=args.slice_pad, planar_pad=args.planar_pad)
+        max_tumors = max(max_tumors, len(props))
+        sweep_data.append((thr, props))
 
-    fig, axes = plt.subplots(n_rows, 3,
-                             figsize=(12, n_rows * 2.6),
-                             constrained_layout=True)
+    max_tumors = min(max_tumors, 4)
+    n_rows, n_cols = len(UNET_THRESHOLDS), 1 + (max_tumors * 3)
+    
+    fig = plt.figure(figsize=(max(8, n_cols * 2.5), n_rows * 3.0), constrained_layout=True)
     fig.patch.set_facecolor("#111111")
-    fig.suptitle(f"Proposal network threshold sweep — {patient_id}",
-                 color="white", fontsize=10)
+    fig.suptitle(f"UNet sweep — {patient_id}", color="white", fontsize=11)
+    grid = fig.add_gridspec(n_rows, n_cols, wspace=0.05, hspace=0.3)
 
-    from auto_prompting.pet_proposal import mask_to_proposals
+    for row, (thr, props) in enumerate(sweep_data):
+        ax_info = fig.add_subplot(grid[row, 0])
+        _dark_ax(ax_info)
+        ax_info.text(0.5, 0.5, f"thr={thr:.2f}\n\n{len(props)} tumors", color="gold", ha="center", va="center", fontsize=9, fontweight="bold")
 
-    for row, thr in enumerate(thresholds):
-        props = mask_to_proposals(prob > thr,
-                                  slice_pad=args.slice_pad,
-                                  planar_pad=args.planar_pad)
-        z = best_z(props, D)
-
-        ax_prob, ax_bin, ax_ct = axes[row]
-        for ax in (ax_prob, ax_bin, ax_ct):
-            _dark_ax(ax)
-
-        ax_prob.imshow(prob[z], cmap="magma", vmin=0, vmax=1, interpolation="nearest")
-        ax_prob.set_title(f"thr={thr:.2f}  z={z}", color="white", fontsize=7)
-
-        ax_bin.imshow(ct[z], cmap="gray", interpolation="nearest")
-        ov = np.zeros((*prob[z].shape, 4), dtype=np.float32)
-        ov[prob[z] > thr] = [1.0, 0.8, 0.0, 0.5]
-        ax_bin.imshow(ov, interpolation="nearest")
-        draw_boxes(ax_bin, [p for p in props if p["z_mid"] == z], "gold")
-        ax_bin.set_title(f"{len(props)} proposals", color="white", fontsize=7)
-
-        ax_ct.imshow(ct[z], cmap="gray", interpolation="nearest")
-        gt_overlay(ax_ct, gts[z])
-        ax_ct.set_title("CT + GT", color="white", fontsize=7)
+        for t_idx, p in enumerate(props[:max_tumors]):
+            plot_tumor_sequence(fig, grid, row, 1 + t_idx * 3, ct, gts, prob > thr, p, "gold")
 
     return fig
 
 
 # ---------------------------------------------------------------------------
-# C) Hybrid overview (single default run)
+# C) Hybrid overview
 # ---------------------------------------------------------------------------
 
-def make_hybrid_figure(patient_id: str, data: dict,
-                        prompter: AutoPrompter,
-                        args: argparse.Namespace) -> plt.Figure:
-    ct  = data["ct_imgs"]
-    pet = data["pet_imgs"]
-    gts = data["gts"]
-    D   = ct.shape[0]
+def make_hybrid_figure(patient_id: str, data: dict, prompter: AutoPrompter, args: argparse.Namespace) -> plt.Figure:
+    ct, gts = data["ct_imgs"], data["gts"]
+    components_per_label = prompter.get_proposals(ct, data["pet_imgs"], data["suv_max"])
 
-    components_per_label = prompter.get_proposals(ct, pet, data["suv_max"])
-    all_props = [p for comps in components_per_label.values() for p in comps]
-    z = best_z(all_props, D)
+    max_tumors = max((len(comps) for comps in components_per_label.values()), default=1)
+    max_tumors = min(max_tumors, 5)
+    n_rows, n_cols = 2, 1 + (max_tumors * 3)
 
-    fig, axes = plt.subplots(1, 3, figsize=(13, 4.5), constrained_layout=True)
+    fig = plt.figure(figsize=(max(8, n_cols * 2.5), n_rows * 3.5), constrained_layout=True)
     fig.patch.set_facecolor("#111111")
-    fig.suptitle(
-        f"Hybrid ({prompter.pet_method}) — {patient_id}  "
-        f"| GTVp={len(components_per_label.get(1,[]))}  "
-        f"GTVn={len(components_per_label.get(2,[]))}",
-        color="white", fontsize=10,
-    )
-    for ax, (title, cmap, bg) in zip(axes, [
-        (f"CT z={z}",  "gray", ct[z]),
-        (f"PET z={z}", "hot",  pet[z]),
-        ("Proposals + GT", "gray", ct[z]),
-    ]):
-        _dark_ax(ax)
-        ax.imshow(bg, cmap=cmap, interpolation="nearest")
-        ax.set_title(title, color="white", fontsize=8)
+    fig.suptitle(f"Hybrid Auto-Prompts ({prompter.pet_method}) — {patient_id}", color="white", fontsize=11)
+    grid = fig.add_gridspec(n_rows, n_cols, wspace=0.05, hspace=0.3)
 
-    gt_overlay(axes[2], gts[z])
-    label_colors = {1: "tomato", 2: "deepskyblue"}
-    for label_id, comps in components_per_label.items():
-        draw_boxes(axes[2], [p for p in comps if p["z_mid"] == z],
-                   label_colors[label_id])
+    labels = {1: "GTVp (Primary)", 2: "GTVn (Nodal)"}
+    for row, label_id in enumerate([1, 2]):
+        props = components_per_label.get(label_id, [])
+        color = GT_COLORS[label_id]
+        
+        ax_info = fig.add_subplot(grid[row, 0])
+        _dark_ax(ax_info)
+        ax_info.text(0.5, 0.5, f"{labels[label_id]}\n\n{len(props)} tumors", color=color, ha="center", va="center", fontsize=10, fontweight="bold")
+
+        for t_idx, p in enumerate(props[:max_tumors]):
+            plot_tumor_sequence(fig, grid, row, 1 + t_idx * 3, ct, gts, None, p, color)
+
     return fig
 
 
@@ -356,74 +269,49 @@ def make_hybrid_figure(patient_id: str, data: dict,
 # ---------------------------------------------------------------------------
 
 def main(args: argparse.Namespace) -> None:
-    npz_dir    = Path(args.npz_dir)
+    npz_dir = Path(args.npz_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     npz_files = sorted(npz_dir.glob("*.npz"))
-    if not npz_files:
-        raise FileNotFoundError(f"No NPZ files found in {npz_dir}")
-
     random.seed(args.seed)
     selected = random.sample(npz_files, min(args.k, len(npz_files)))
-    print(f"Testing auto_prompting on {len(selected)}/{len(npz_files)} "
-          f"patients from {npz_dir}\n")
-
-    # Load model once if provided
-    model = None
+    
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = None
     if args.proposal_model:
         from auto_prompting.proposal_net import Small3DUNet
-        print(f"Loading proposal network: {args.proposal_model}")
         model = Small3DUNet.load(args.proposal_model, device=device)
-        n_params = sum(p.numel() for p in model.parameters())
-        print(f"  Parameters: {n_params:,}  ({n_params/1e6:.2f}M)\n")
-
-    # Build hybrid prompter (one per PET method so we can vary it)
-    hybrid_prompter = None
-    if model is not None:
-        hybrid_prompter = AutoPrompter(
-            method         = "hybrid",
-            model_path     = args.proposal_model,
-            pet_method     = "base41",   # shown in figure title
-            device         = device,
-            prob_threshold = args.prob_threshold,
-            slice_pad      = args.slice_pad,
-            planar_pad     = args.planar_pad,
-        )
+        
+    hybrid_prompter = AutoPrompter("hybrid", args.proposal_model, "base41", device, args.prob_threshold, 
+                                   slice_pad=args.slice_pad, planar_pad=args.planar_pad) if model else None
 
     for npz_path in selected:
-        pid  = npz_path.stem
+        pid = npz_path.stem
         print(f"  [{pid}]")
         data = load_npz(npz_path)
 
-        # ── A: PET parameter sweeps ──────────────────────────────────────
         for method in PET_SWEEPS:
-            if method != "base41" and data["suv_max"] is None:
+            if method != "base41" and data["suv_max"] is None: 
                 print(f"    [SKIP] {method} — no suv_max in NPZ")
                 continue
             fig = make_pet_sweep_figure(pid, data, method, args)
             out = output_dir / f"{pid}_pet_{method}_sweep.png"
-            fig.savefig(out, dpi=150, bbox_inches="tight",
-                        facecolor=fig.get_facecolor())
+            fig.savefig(output_dir / f"{pid}_pet_{method}_sweep.png", dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
             plt.close(fig)
             print(f"    Saved → {out}")
 
-        # ── B: Proposal network sweep ────────────────────────────────────
-        if model is not None:
+        if model:
             fig = make_net_sweep_figure(pid, data, model, device, args)
             out = output_dir / f"{pid}_proposal_net_sweep.png"
-            fig.savefig(out, dpi=150, bbox_inches="tight",
-                        facecolor=fig.get_facecolor())
+            fig.savefig(output_dir / f"{pid}_proposal_net_sweep.png", dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
             plt.close(fig)
             print(f"    Saved → {out}")
 
-        # ── C: Hybrid ────────────────────────────────────────────────────
-        if hybrid_prompter is not None:
+        if hybrid_prompter:
             fig = make_hybrid_figure(pid, data, hybrid_prompter, args)
             out = output_dir / f"{pid}_hybrid.png"
-            fig.savefig(out, dpi=150, bbox_inches="tight",
-                        facecolor=fig.get_facecolor())
+            fig.savefig(output_dir / f"{pid}_hybrid.png", dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
             plt.close(fig)
             print(f"    Saved → {out}")
 
@@ -437,21 +325,15 @@ def main(args: argparse.Namespace) -> None:
         print("  {pid}_proposal_net_sweep.png   — Test B: UNet density threshold sweep")
         print("  {pid}_hybrid.png               — Test C: Hybrid default result")
 
-
+        
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(
-        description="Visual smoke-test for the auto_prompting package.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    p.add_argument("--npz_dir",    default="/data/ethan/MedSAM2/hecktor_npz/val")
+    p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    p.add_argument("--npz_dir", default="/data/ethan/MedSAM2/hecktor_npz/val")
     p.add_argument("--output_dir", default="/data/ethan/MedSAM2/auto_prompt_test")
-    p.add_argument("--k",          type=int,   default=5, help="Patients to sample.")
-    p.add_argument("--seed",       type=int,   default=42)
-    p.add_argument("--proposal_model", default=None,
-                   help="Path to Small3DUNet .pt checkpoint. "
-                        "Enables tests B (net) and C (hybrid). "
-                        "Omit to run PET-only test A.")
+    p.add_argument("--k", type=int, default=5)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--proposal_model", default=None)
     p.add_argument("--prob_threshold", type=float, default=0.25)
-    p.add_argument("--slice_pad",  type=int,   default=1)
-    p.add_argument("--planar_pad", type=int,   default=5)
+    p.add_argument("--slice_pad", type=int, default=1)
+    p.add_argument("--planar_pad", type=int, default=5)
     main(p.parse_args())
