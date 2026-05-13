@@ -50,6 +50,7 @@ from typing import Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from auto_prompting.pet_proposal import get_pet_proposals, mask_to_proposals
 from auto_prompting.box_utils import iou_3d, nms_3d
@@ -74,9 +75,17 @@ def _unet_proposals(ct_uint8: np.ndarray,
 
     x = torch.tensor(np.stack([ct, pet], axis=0)).unsqueeze(0).float().to(device)
 
+    # --- FIX: Pad to multiple of 16 ---
+    _, _, D, H, W = x.shape
+    pad_d = (16 - (D % 16)) % 16
+    pad_h = (16 - (H % 16)) % 16
+    pad_w = (16 - (W % 16)) % 16
+    x = F.pad(x, (0, pad_w, 0, pad_h, 0, pad_d))
+
     model.eval()
     with torch.no_grad():
-        prob = model(x)[0, 0].cpu().numpy()   # (D, H, W) in [0, 1]
+        # Run model and crop back to original (D, H, W)
+        prob = model(x)[0, 0, :D, :H, :W].cpu().numpy()
 
     binary = prob > threshold
     return mask_to_proposals(

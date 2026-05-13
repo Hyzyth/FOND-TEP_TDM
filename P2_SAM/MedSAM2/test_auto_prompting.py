@@ -46,6 +46,7 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 # ── Repo root on path ────────────────────────────────────────────────────────
 _HERE = Path(__file__).resolve().parent
@@ -250,16 +251,25 @@ def make_net_sweep_figure(patient_id: str, data: dict,
     ct  = data["ct_imgs"]
     pet = data["pet_imgs"]
     gts = data["gts"]
-    D   = ct.shape[0]
 
     x = torch.tensor(
         np.stack([ct.astype(np.float32) / 255.0,
                   pet.astype(np.float32) / 255.0], axis=0)
     ).unsqueeze(0).float().to(device)
 
+    # --- FIX: Pad to multiple of 16 ---
+    _, _, D, H, W = x.shape
+    pad_d = (16 - (D % 16)) % 16
+    pad_h = (16 - (H % 16)) % 16
+    pad_w = (16 - (W % 16)) % 16
+    
+    # F.pad format: (pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back)
+    x = F.pad(x, (0, pad_w, 0, pad_h, 0, pad_d))
+
     model.eval()
     with torch.no_grad():
-        prob = model(x)[0, 0].cpu().numpy()   # (D, H, W)
+        # Run model and crop back to original (D, H, W)
+        prob = model(x)[0, 0, :D, :H, :W].cpu().numpy()
 
     thresholds = UNET_THRESHOLDS
     n_rows = len(thresholds)

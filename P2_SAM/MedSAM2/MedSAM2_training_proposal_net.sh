@@ -64,7 +64,7 @@ TVERSKY_ALPHA=0.30
 TVERSKY_BETA=0.70
 
 # Training
-NUM_EPOCHS=40
+NUM_EPOCHS=100
 BATCH_SIZE=68           # Reduce to 1 if OOM; full-volume batches are large
 LR=1e-3
 WEIGHT_DECAY=1e-4
