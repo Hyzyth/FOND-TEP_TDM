@@ -22,7 +22,7 @@ scratch:
   base_lr: 5.0e-5
   vision_lr: 3.0e-5
   phases_per_epoch: 1
-  num_epochs: 100                 # Full training
+  num_epochs: 300                 # Full training
 
 # ---------------------------------------------------------------------------
 # Dataset paths
