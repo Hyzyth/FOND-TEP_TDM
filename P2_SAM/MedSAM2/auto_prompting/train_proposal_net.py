@@ -3,15 +3,6 @@ auto_prompting/train_proposal_net.py
 =====================================
 Train the Small3DUNet proposal network on HECKTOR NPZ data.
 
-Objective: high-recall coarse tumour mask — used as the 'unet' and 'hybrid'
-proposal modes in infer_hecktor.py, not as a final segmentation model.
-
-Losses and metrics are specific to the recall-biased proposal objective and
-are NOT duplicates of training/loss_fns.py (which contains
-MultiStepMultiMasksAndIous for the full SAM2 training pipeline).
-
-AverageMeter is imported from training.utils.train_utils to avoid duplication.
-
 Checkpoints are saved under /data/ethan/MedSAM2/proposal_net/checkpoints/ by
 default, matching the rest of the project's data layout.
 
@@ -159,62 +150,74 @@ class HECKTORProposalDataset(Dataset):
 # Loss functions
 # ──────────────────────────────────────────────────────────────────────────────
 
-def dice_loss(pred: torch.Tensor, target: torch.Tensor,
-              eps: float = 1e-6) -> torch.Tensor:
-    """Per-sample soft Dice loss, averaged over the batch.
+def tversky_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    alpha: float = 0.3,
+    beta: float = 0.7,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Per-sample Tversky loss, averaged over the batch.
 
-    FIX: The original implementation computed a single Dice over the entire
-    concatenated batch.  For a 64×128×128 crop with ~1 % foreground the
-    gradient was ≈2P/N² ≈10⁻⁹ — effectively zero.  Computing per-sample
-    Dice and averaging gives gradient magnitude O(1/P_sample) which is
-    stable regardless of batch size or tumour fraction.
+    Tversky index = TP / (TP + alpha*FP + beta*FN)
 
-    Parameters
-    ----------
-    pred   : (B, 1, D, H, W)  sigmoid probabilities in [0, 1]
-    target : (B, 1, D, H, W)  binary ground truth {0, 1}
+    With beta=0.7 alpha=0.3: FN penalised more than FP (recall-biased).
+    Gradient at pred~0.02 for a tumour voxel:
+        d(TL)/d(pred_i) ~ -beta / (tp + alpha*fp + beta*fn)
+    This is large and negative regardless of how many background voxels exist.
+    No saddle point.
     """
-    # Flatten spatial dims; keep batch dim
     B = pred.shape[0]
-    p = pred.view(B, -1)    # (B, N)
-    t = target.view(B, -1)  # (B, N)
+    p = pred.view(B, -1)
+    t = target.view(B, -1)
+    tp = (p * t).sum(dim=1)
+    fp = (p * (1.0 - t)).sum(dim=1)
+    fn = ((1.0 - p) * t).sum(dim=1)
+    tversky_idx = (tp + eps) / (tp + alpha * fp + beta * fn + eps)
+    return (1.0 - tversky_idx).mean()
 
-    tp    = (p * t).sum(dim=1)                    # (B,)
-    denom = p.sum(dim=1) + t.sum(dim=1) + eps     # (B,)
-    return (1.0 - (2.0 * tp + eps) / denom).mean()
 
+def focal_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    gamma: float = 2.0,
+    alpha: float = 0.75,
+    eps: float = 1e-7,
+) -> torch.Tensor:
+    """Alpha-balanced focal loss.
 
-def combined_loss(pred: torch.Tensor,
-                  target: torch.Tensor,
-                  bce_weight: float = 0.3) -> torch.Tensor:
-    """Dice-biased loss with dynamically-weighted BCE.
-
-    FIX: The original unweighted BCE was dominated by the ~99 % background
-    voxels in HECKTOR crops.  Without pos_weight the model collapses to
-    outputting a constant ~0.3 for all voxels, which at the default 0.25
-    metric threshold gives recall=1.000, precision=0.010, DSC=0.020.
-
-    pos_weight = n_neg / n_pos per batch (capped at 100) rebalances the
-    BCE gradient so that a single false-negative costs as much as all false-
-    positives combined — matching the high-recall objective.
-
-    This is equivalent to BCEWithLogitsLoss(pos_weight=...) but applied to
-    already-sigmoid outputs.
+    (1 - pt)^gamma downweights easy voxels (background already near 0 after
+    prior-bias init), focusing gradient on uncertain boundary voxels.
+    alpha=0.75 upweights the tumour class.
     """
-    # ── Dynamic positive-class weight ─────────────────────────────────────
-    n_pos = target.sum().clamp(min=1.0)
-    n_neg = (1.0 - target).sum().clamp(min=1.0)
-    pos_weight = (n_neg / n_pos).clamp(max=100.0)
-
-    # Weighted BCE: penalises FN by pos_weight, FP by 1
-    eps = 1e-7
     bce = -(
-        pos_weight * target       * (pred + eps).log() +
+        target         * (pred + eps).log() +
         (1.0 - target) * (1.0 - pred + eps).log()
-    ).mean()
+    )
+    pt = torch.where(target == 1, pred, 1.0 - pred)
+    at = torch.where(
+        target == 1,
+        torch.full_like(pred, alpha),
+        torch.full_like(pred, 1.0 - alpha),
+    )
+    return (at * (1.0 - pt).pow(gamma) * bce).mean()
 
-    dl = dice_loss(pred, target)
-    return bce_weight * bce + (1.0 - bce_weight) * dl
+
+def combined_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    focal_weight: float = 0.3,
+    tversky_alpha: float = 0.3,
+    tversky_beta: float = 0.7,
+) -> torch.Tensor:
+    """Focal (focal_weight) + Tversky (1-focal_weight).
+
+    The --focal_weight CLI argument replaces --bce_weight with the same
+    default (0.3) and the same role (auxiliary loss share).
+    """
+    fl = focal_loss(pred, target)
+    tl = tversky_loss(pred, target, alpha=tversky_alpha, beta=tversky_beta)
+    return focal_weight * fl + (1.0 - focal_weight) * tl
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -222,22 +225,24 @@ def combined_loss(pred: torch.Tensor,
 # ──────────────────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
-def compute_metrics(model: nn.Module,
-                    loader: DataLoader,
-                    device: str,
-                    threshold: float = 0.25) -> dict[str, float]:
-    """Compute recall, precision, Dice, and mean predicted probability.
+def compute_metrics(
+    model: nn.Module,
+    loader: DataLoader,
+    device: str,
+    threshold: float = 0.25,
+) -> dict[str, float]:
+    """Recall, precision, Dice, and mean_pred at the given threshold.
 
-    mean_pred is the key diagnostic for the "predict everything" collapse:
-      - Collapse fingerprint  : mean_pred ≈ 0.3–0.5  with recall=1.000
-      - Healthy training      : mean_pred ≪ 0.5 (proportional to tumour fraction)
+    mean_pred diagnostics:
+      Collapse : mean_pred > 0.3  (output too high everywhere)
+      Healthy  : mean_pred ~ prior_prob (~ 0.02 for HECKTOR after bias init)
     """
     recalls, precisions, dices, mean_preds = [], [], [], []
     model.eval()
 
     for x, y in loader:
         x, y = x.to(device), y.to(device)
-        prob = model(x)                             # (B,1,D,H,W) in [0,1]
+        prob = model(x)
         mean_preds.append(prob.mean().item())
 
         pred = (prob > threshold).float()
@@ -252,7 +257,7 @@ def compute_metrics(model: nn.Module,
         "recall":    float(np.mean(recalls)),
         "precision": float(np.mean(precisions)),
         "dice":      float(np.mean(dices)),
-        "mean_pred": float(np.mean(mean_preds)),   # NEW: collapse diagnostic
+        "mean_pred": float(np.mean(mean_preds)),
     }
 
 
@@ -268,25 +273,30 @@ def train(args: argparse.Namespace) -> None:
     os.makedirs(args.output_dir, exist_ok=True)
     log_csv = os.path.join(args.output_dir, "training_log.csv")
 
-    logger.info("=" * 56)
+    logger.info("=" * 60)
     logger.info("  Small3DUNet Proposal Network — Training")
-    logger.info("=" * 56)
-    logger.info("  Device       : %s", args.device)
-    logger.info("  Train dir    : %s", args.train_dir)
-    logger.info("  Val dir      : %s", args.val_dir or args.train_dir)
-    logger.info("  Output dir   : %s", args.output_dir)
-    logger.info("  Crop size    : %s", args.crop_size or "full volume")
-    logger.info("  Epochs       : %d", args.num_epochs)
-    logger.info("  Batch size   : %d", args.batch_size)
-    logger.info("  LR           : %.2e  (cosine → %.2e)", args.lr, args.lr / 20)
-    logger.info("  Loss weights : BCE=%.2f  Dice=%.2f  (pos_weight dynamic)",
-                args.bce_weight, 1.0 - args.bce_weight)
-    logger.info("  Val every    : %d epochs", args.val_every)
-    logger.info("  Threshold    : %.2f (for metrics)", args.threshold)
-    logger.info("=" * 56)
+    logger.info("=" * 60)
+    logger.info("  Device         : %s", args.device)
+    logger.info("  Train dir      : %s", args.train_dir)
+    logger.info("  Val dir        : %s", args.val_dir or args.train_dir)
+    logger.info("  Output dir     : %s", args.output_dir)
+    logger.info("  Crop size      : %s", args.crop_size or "full volume")
+    logger.info("  Epochs         : %d", args.num_epochs)
+    logger.info("  Batch size     : %d", args.batch_size)
+    logger.info("  LR             : %.2e  (cosine -> %.2e)", args.lr, args.lr / 20)
+    logger.info("  Loss           : Focal(%.2f) + Tversky(%.2f)  [a=%.2f b=%.2f]",
+                args.focal_weight, 1.0 - args.focal_weight,
+                args.tversky_alpha, args.tversky_beta)
+    logger.info("  Prior prob     : %.3f  (output bias init)", args.prior_prob)
+    logger.info("  Val every      : %d epochs", args.val_every)
+    logger.info("  Threshold      : %.2f (metrics)", args.threshold)
+    logger.info("  Recall guard   : >= %.2f to save best", args.min_recall_for_save)
+    logger.info("=" * 60)
 
-    crop_size = (tuple(int(v) for v in args.crop_size.split(","))
-                 if args.crop_size else None)
+    crop_size = (
+        tuple(int(v) for v in args.crop_size.split(","))
+        if args.crop_size else None
+    )
 
     # ── Datasets ─────────────────────────────────────────────────────────
     train_ds = HECKTORProposalDataset(args.train_dir, crop_size, augment=True)
@@ -303,11 +313,13 @@ def train(args: argparse.Namespace) -> None:
     device = args.device
     model  = Small3DUNet(in_channels=2,
                          base=args.base_features,
-                         dropout=args.dropout).to(device)
+                         dropout=args.dropout,
+                         prior_prob=args.prior_prob).to(device)
+    
     logger.info("Small3DUNet  params: %d  (%.2fM)",
                 count_parameters(model), count_parameters(model) / 1e6)
-    logger.info("  in_channels=%d  base=%d  dropout=%.2f",
-                args.base_features, args.base_features, args.dropout)
+    logger.info("  output_bias init: %.3f  (mean_pred at epoch-0 ~ %.3f)",
+                model.output_bias.item(), args.prior_prob)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
                                   weight_decay=args.weight_decay)
@@ -321,10 +333,11 @@ def train(args: argparse.Namespace) -> None:
 
     # ── CSV header ────────────────────────────────────────────────────────
     with open(log_csv, "w", newline="") as f:
-        csv.writer(f).writerow(
-            ["epoch", "train_loss", "val_recall", "val_precision",
-             "val_dice", "lr", "duration_s", "is_best"]
-        )
+        csv.writer(f).writerow([
+            "epoch", "train_loss",
+            "val_recall", "val_precision", "val_dice", "val_mean_pred",
+            "lr", "duration_s", "is_best",
+        ])
 
     # ── Epoch loop ────────────────────────────────────────────────────────
     for epoch in range(1, args.num_epochs + 1):
@@ -336,7 +349,12 @@ def train(args: argparse.Namespace) -> None:
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad()
             pred = model(x)
-            loss = combined_loss(pred, y, bce_weight=args.bce_weight)
+            loss = combined_loss(
+                pred, y,
+                focal_weight  = args.focal_weight,
+                tversky_alpha = args.tversky_alpha,
+                tversky_beta  = args.tversky_beta,
+            )
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -417,6 +435,7 @@ def _save_ckpt(model: Small3DUNet, path: str, epoch: int, metrics: dict) -> None
             "in_channels": model.in_channels,
             "base":        model.base,
             "dropout":     model.dropout,
+            "prior_prob":  model.prior_prob,
         },
     }, path)
 
@@ -442,23 +461,32 @@ def parse_args() -> argparse.Namespace:
     # Architecture
     p.add_argument("--base_features", type=int, default=16)
     p.add_argument("--dropout",       type=float, default=0.1)
+    p.add_argument("--prior_prob",    type=float, default=0.02,
+                   help="Expected foreground fraction — initialises output bias "
+                        "so mean_pred ~ prior_prob at epoch 0, avoiding p=0.5 "
+                        "saddle point.")
+
+    # Loss
+    p.add_argument("--focal_weight",  type=float, default=0.3,
+                   help="Focal loss share; Tversky = 1 - focal_weight.")
+    p.add_argument("--tversky_alpha", type=float, default=0.3,
+                   help="Tversky FP weight (lower = more recall-biased).")
+    p.add_argument("--tversky_beta",  type=float, default=0.7,
+                   help="Tversky FN weight (higher = more recall-biased).")
 
     # Training
     p.add_argument("--num_epochs",    type=int,   default=40)
     p.add_argument("--batch_size",    type=int,   default=1)
     p.add_argument("--lr",            type=float, default=1e-3)
     p.add_argument("--weight_decay",  type=float, default=1e-4)
-    p.add_argument("--bce_weight",    type=float, default=0.3,
-                   help="BCE weight; recall weight = 1 − bce_weight.")
     p.add_argument("--crop_size",     type=str,   default="64,128,128",
-                   help="D,H,W crop. Pass empty string for full-volume.")
-    p.add_argument("--threshold",     type=float, default=0.25,
-                   help="Probability threshold used for metric computation.")
+                   help="D,H,W crop. Empty string = full volume.")
+    p.add_argument("--threshold",     type=float, default=0.25)
     p.add_argument("--val_every",     type=int,   default=5)
-    p.add_argument("--min_recall_for_save", type=float, default=0.80,
-                   help="Minimum recall a checkpoint must achieve to be saved as 'best'. "
-                        "Prevents saving a high-Dice but low-recall (over-conservative) model. "
-                        "Set to 0 to rank purely by Dice.")
+    p.add_argument("--min_recall_for_save", type=float, default=0.50,
+                   help="Minimum recall to save a 'best' checkpoint. "
+                        "Lowered from 0.80 because model starts at recall~0 "
+                        "after bias init. Raise once training looks healthy.")
 
     # Misc
     p.add_argument("--num_workers",   type=int,   default=2)

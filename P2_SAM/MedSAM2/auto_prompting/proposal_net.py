@@ -3,31 +3,37 @@ auto_prompting/proposal_net.py
 ================================
 MONAI-based 3D U-Net for coarse tumour probability estimation.
 
-Why MONAI UNet over the custom implementation
-----------------------------------------------
-The custom U-Net had skip-connection shape mismatches when input spatial dims
-were not perfectly divisible by 2^depth, requiring manual trilinear
-interpolation patches.  MONAI's UNet handles upsampling padding internally,
-is battle-tested on medical volumes, and supports residual units out of the box.
-
 Architecture (default base=16)
 -------------------------------
   Channels : 16 → 32 → 64 → 128
-  Strides  : 2,  2,  2         (3 pooling steps; min spatial dim divisor = 8)
-  Residual : 2 units per block (standard for medical segmentation)
-  Norm     : InstanceNorm3d    (stable with batch_size=1)
+  Strides  : 2,  2,  2
+  Residual : 2 units per block
+  Norm     : InstanceNorm3d
   Act      : LeakyReLU
-  Params   : ~1.2 M at base=16 (vs 340 K previously; still lightweight)
+  Params   : ~1.2 M
 
 Input  : (B, 2, D, H, W) float32 in [0, 1]   — channels [CT, PET]
 Output : (B, 1, D, H, W) float32 in [0, 1]   — tumour probability
 
-Crop-size constraint: each spatial dim divisible by 8 at training time.
-At inference MONAI pads internally, so arbitrary input sizes are accepted.
-With the default crop_size=64,128,128 the constraint is trivially satisfied.
+CHANGE — Prior-probability output bias
+---------------------------------------
+The MONAI UNet's final layer bias defaults to zero, which means
+sigmoid(0) = 0.5 for all voxels at initialisation.  With a 99:1
+background-to-foreground ratio the loss gradient is near-zero at p=0.5,
+trapping the optimiser in a flat region for tens of epochs.
+
+Setting output_bias = log(prior / (1-prior)) so that the model starts with
+mean_pred ≈ prior (default 0.02) places it in a region of strong Tversky
+gradient immediately.  This is the same technique used in RetinaNet
+(Lin et al. 2017, §4.1) for class-imbalanced detection.
+
+The bias is stored as a scalar nn.Parameter so it is learnable and
+automatically saved/loaded with the rest of the state dict.
 """
 
 from __future__ import annotations
+
+import math
 
 import torch
 import torch.nn as nn
@@ -41,10 +47,12 @@ class Small3DUNet(nn.Module):
 
     Parameters
     ----------
-    in_channels : int   Input channels (default 2 = CT + PET).
-    base        : int   Base feature-map width.  Channels are
-                        (base, base×2, base×4, base×8).  Default 16.
-    dropout     : float Dropout probability applied inside each block.
+    in_channels : int    Input channels (default 2 = CT + PET).
+    base        : int    Base feature-map width.
+    dropout     : float  Dropout probability.
+    prior_prob  : float  Expected foreground fraction at initialisation.
+                         Sets the output bias so mean_pred ≈ prior_prob,
+                         avoiding the p=0.5 saddle point.  Default 0.02.
     """
 
     def __init__(
@@ -52,12 +60,14 @@ class Small3DUNet(nn.Module):
         in_channels: int = 2,
         base: int = 16,
         dropout: float = 0.1,
+        prior_prob: float = 0.02,
     ) -> None:
         super().__init__()
 
         self.in_channels = in_channels
         self.base        = base
         self.dropout     = dropout
+        self.prior_prob  = prior_prob
 
         self.net = MonaiUNet(
             spatial_dims  = 3,
@@ -71,6 +81,14 @@ class Small3DUNet(nn.Module):
             dropout       = dropout,
         )
 
+        # Scalar bias added to logits before sigmoid.
+        # Initialised so that sigmoid(bias) ≈ prior_prob:
+        #   bias = log(prior / (1 - prior))
+        # This moves the starting mean_pred from 0.5 down to ~prior_prob,
+        # immediately giving strong gradient signal.
+        bias_init = math.log(prior_prob / (1.0 - prior_prob))
+        self.output_bias = nn.Parameter(torch.tensor(bias_init))
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Parameters
@@ -81,7 +99,7 @@ class Small3DUNet(nn.Module):
         -------
         (B, 1, D, H, W) probability map in [0, 1]
         """
-        return torch.sigmoid(self.net(x))
+        return torch.sigmoid(self.net(x) + self.output_bias)
 
     # ── Persistence ───────────────────────────────────────────────────────
 
@@ -94,6 +112,7 @@ class Small3DUNet(nn.Module):
                     "in_channels": self.in_channels,
                     "base":        self.base,
                     "dropout":     self.dropout,
+                    "prior_prob":  self.prior_prob,
                 },
             },
             path,
@@ -104,6 +123,8 @@ class Small3DUNet(nn.Module):
         """Load a checkpoint saved with :meth:`save`."""
         ckpt = torch.load(path, map_location=device, weights_only=False)
         cfg  = ckpt.get("config", {})
+        # Backward compatibility: old checkpoints lack prior_prob
+        cfg.setdefault("prior_prob", 0.02)
         net  = cls(**cfg)
         net.load_state_dict(ckpt["model_state"])
         net.eval()
