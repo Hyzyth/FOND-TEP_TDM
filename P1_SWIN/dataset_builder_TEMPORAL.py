@@ -13,12 +13,16 @@ subfolder that contains:
 
 The script:
   1. Merges PET + CT → 4-D NIfTI  (channel 0 = PET, channel 1 = CT)
-  2. Combines tumor T (=1) and node N (=2) into a single GT mask on the CT grid
+  2. Combines tumor T (=1) and node N (=2) into a single GT mask on the CT grid.
+     Cases with only an N mask (no T) are KEPT — the GT will contain only
+     label=2 voxels. Cases with neither T nor N are skipped.
   3. Writes everything under --output_folder:
        imagesTs/    — fused 4-D PET+CT  (model input)
        labelsTs/    — combined GT mask
        rawImagesTs/ — raw (non-fused) PET and CT kept separately
-  4. Generates a MONAI-compatible JSON (all cases in "validation")
+  4. Generates a MONAI-compatible JSON (all cases in "validation").
+     Each entry carries has_gtv_t and has_gtv_n boolean flags for
+     per-class Dice evaluation downstream.
 
 Usage:
     python3 dataset_builder_temporal.py                          # defaults
@@ -125,14 +129,28 @@ def find_gt_masks(rtstruct_dir: str):
 
 def best_gt(rtstruct_dirs: list):
     """
-    Return (t_path, n_path) from the first RTStruct dir that has at least
-    a T mask. Tries all dirs in sorted order.
+    Return (t_path, n_path) from the RTStruct dirs.
+
+    Strategy:
+      - Prefer the first (sorted) dir that contains a T mask; return
+        its T and N together.
+      - If no dir has a T mask but at least one has an N mask, return
+        (None, n_path) — a valid N-only case.
+      - Return (None, None) only when no mask of any kind is found.
+
+    NOTE: when len(rtstruct_dirs) > 1 the caller logs a warning so that
+    cases with competing annotations can be reviewed manually.
     """
+    best_n_fallback = None
+
     for rdir in sorted(rtstruct_dirs):
         t, n = find_gt_masks(rdir)
         if t is not None:
-            return t, n
-    return None, None
+            return t, n           # T found — best case, stop here
+        if n is not None and best_n_fallback is None:
+            best_n_fallback = n   # record first N-only dir as fallback
+
+    return None, best_n_fallback  # N-only or completely empty
 
 
 # ── SimpleITK helpers ─────────────────────────────────────────────────────────
@@ -181,6 +199,10 @@ def merge_pet_ct(pet_path: str, ct_path: str, output_path: str):
 def build_gt_mask(t_path, n_path, ct_path: str, output_path: str) -> bool:
     """
     Build a combined GT mask (T=1, N=2) on the CT grid.
+
+    t_path may be None for N-only cases — the resulting mask will contain
+    only label=2 voxels (no label=1 region).  n_path may also be None for
+    T-only cases.  At least one of t_path / n_path must be non-None.
 
     BUG FIX: masks are ALWAYS resampled to the CT reference regardless of
     whether their voxel-grid size happens to match.  Two images can share the
@@ -305,22 +327,66 @@ def main():
             for study_dir in search_dirs:
                 ct_files, pet_files, rtstruct_dirs = scan_study_dir(study_dir)
 
-                if not ct_files or not pet_files or not rtstruct_dirs:
-                    continue   # incomplete data — skip silently
+                # Hard skip: cannot run inference without both modalities.
+                if not ct_files or not pet_files:
+                    continue
 
                 ct_path  = ct_files[0]
                 pet_path = pet_files[0]  # SUVbwPT first if available
+                
+                # ── Determine GT availability ──────────────────────────────
+                # Cases without any RTStruct dir, or where no mask file is
+                # found inside the RTStruct dirs, are NOT skipped — they still
+                # get a fused image built and appear in the JSON.  test.py
+                # detects gt_available=False and skips only the Dice step,
+                # writing a "no_gt_available" row to the CSV instead.
 
-                t_path, n_path = best_gt(rtstruct_dirs)
-                if t_path is None:
-                    skipped += 1
-                    print(f"  ⚠  No tumor GT — {pat_id}/{tp_raw} — skipped")
-                    continue
+                if not rtstruct_dirs:
+                    t_path = n_path = None
+                    gt_reason = "no_rtstruct_dir"
+                else:
+                    # ── Warn when multiple competing RTStruct dirs are present ──
+                    if len(rtstruct_dirs) > 1:
+                        print(f"  ℹ  Multiple RTStruct dirs ({len(rtstruct_dirs)}) for "
+                              f"{pat_id}/{tp_raw} — using first dir that has a T mask "
+                              f"(or first N-only dir). Review manually if needed:")
+                        for rd in sorted(rtstruct_dirs):
+                            print(f"      {os.path.basename(rd)}")
 
-                # Build a unique case identifier
+                    t_path, n_path = best_gt(rtstruct_dirs)
+
+                    if t_path is None and n_path is None:
+                        gt_reason = "no_mask_in_rtstruct"
+                    elif t_path is None:
+                        gt_reason = "n_only"      # N-only: T resolved post-treatment
+                    elif n_path is None:
+                        gt_reason = "t_only"
+                    else:
+                        gt_reason = "ok"
+
+                gt_available = gt_reason == "ok" or gt_reason in ("n_only", "t_only")
+
+                # ── Log what we found ──────────────────────────────────────
                 study_date = os.path.basename(study_dir).replace("__Studies", "")
                 case_id    = f"pat{pat_id}_{tp_norm}_{study_date}"
+                pet_type   = "SUVbw" if "SUVbw" in os.path.basename(pet_path) else "PT"
 
+                if gt_reason == "no_rtstruct_dir":
+                    print(f"  ⚠  {case_id}  [{pet_type}] — no RTStruct dir "
+                          f"(inference only, evaluation skipped)")
+                elif gt_reason == "no_mask_in_rtstruct":
+                    print(f"  ⚠  {case_id}  [{pet_type}] — RTStruct present but "
+                          f"no T/N masks found (inference only, evaluation skipped)")
+                elif gt_reason == "n_only":
+                    print(f"  ✅ {case_id}  [{pet_type} N] — N-only case "
+                          f"(GTV-T absent from mask, label=2 only)")
+                elif gt_reason == "t_only":
+                    print(f"  ✅ {case_id}  [{pet_type} T] — T-only case "
+                          f"(GTV-N absent from mask, label=1 only)")
+                else:
+                    print(f"  ✅ {case_id}  [{pet_type} T N]")
+
+                # ── Output paths ───────────────────────────────────────────
                 out_img = os.path.join(
                     args.output_folder, "imagesTs", f"{case_id}_petct.nii.gz"
                 )
@@ -334,31 +400,37 @@ def main():
                     args.output_folder, "rawImagesTs", f"{case_id}_ct.nii.gz"
                 )
 
-                pet_type = "SUVbw" if "SUVbw" in os.path.basename(pet_path) else "PT"
-                n_flag   = " +N" if n_path else ""
-                print(f"  ✅ {case_id}  [{pet_type}{n_flag}]")
-
                 if not args.dry_run:
                     try:
                         merge_pet_ct(pet_path, ct_path, out_img)
+                        # build_gt_mask handles t_path=None and/or n_path=None:
+                        # both None → all-zero label (MONAI can still load it).
                         non_empty = build_gt_mask(t_path, n_path, ct_path, out_lbl)
-                        if not non_empty:
-                            print(f"     ⚠  GT mask is empty for {case_id}")
+                        if gt_available and not non_empty:
+                            print(f"     ⚠  GT mask written but is empty for {case_id}")
                         copy_raw_images(pet_path, ct_path, out_raw_pet, out_raw_ct)
                     except Exception as e:
                         skipped += 1
                         print(f"  ❌ Error on {case_id}: {e}")
                         continue
 
+                # ── JSON entry ─────────────────────────────────────────────
+                # gt_available=False → test.py skips Dice and logs the reason.
+                # has_gtv_t / has_gtv_n → controls per-class Dice scoring.
+                # gt_reason → human-readable explanation stored for reference.
                 json_data["validation"].append({
-                    "image": f"imagesTs/{case_id}_petct.nii.gz",
-                    "label": f"labelsTs/{case_id}_gt.nii.gz",
-                    "raw_pet": f"rawImagesTs/{case_id}_pet.nii.gz",
-                    "raw_ct":  f"rawImagesTs/{case_id}_ct.nii.gz",
-                    "case_id":    case_id,
-                    "patient":    pat_id,
-                    "timepoint":  tp_norm,
-                    "study_date": study_date,
+                    "image":        f"imagesTs/{case_id}_petct.nii.gz",
+                    "label":        f"labelsTs/{case_id}_gt.nii.gz",
+                    "raw_pet":      f"rawImagesTs/{case_id}_pet.nii.gz",
+                    "raw_ct":       f"rawImagesTs/{case_id}_ct.nii.gz",
+                    "case_id":      case_id,
+                    "patient":      pat_id,
+                    "timepoint":    tp_norm,
+                    "study_date":   study_date,
+                    "gt_available": gt_available,
+                    "gt_reason":    gt_reason,
+                    "has_gtv_t":    t_path is not None,
+                    "has_gtv_n":    n_path is not None,
                 })
                 ok += 1
 

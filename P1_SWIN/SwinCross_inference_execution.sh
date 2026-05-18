@@ -143,3 +143,39 @@ CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
 #     --roi_x 96 --roi_y 96 --roi_z 96 \
 #     --workers               4 \
 #     2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_best_overlap07.log
+
+# =============================================================================
+# STEP 2E — Zero-shot inference on TemPoRAL internal database  [ACTIVE]
+#
+# Prerequisite: run dataset_builder_TEMPORAL.py first to build the preprocessed
+# dataset and JSON:
+#
+#   python3.12 dataset_builder_TEMPORAL.py \
+#       --input_folder  /data/santiago/Database_nifti_TEMPORAL \
+#       --output_folder /data/ethan/SwinCross/PP_temporal_dataset \
+#       --json_name     dataset_swincross_temporal.json
+#
+# Notes:
+#   --data_dir  must point to the temporal output folder because all JSON
+#               paths (imagesTs/…, labelsTs/…) are relative to it.
+#   --json_list names the JSON file *inside* that folder.
+#   test.py writes per_case_dice.csv alongside predictions for direct
+#   comparison with the nnUNet evaluation in evaluation_report_temporal_analyse.xlsx.
+# =============================================================================
+TEMPORAL_DATA=/data/ethan/SwinCross/PP_temporal_dataset
+TEMPORAL_OUTPUT=$INFERENCE_OUTPUT/temporal_zeroshot
+mkdir -p $TEMPORAL_OUTPUT
+
+CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
+    --pretrained_dir        ./runs/$MODEL_DIR \
+    --pretrained_model_name model_best.pth \
+    --output_dir            $TEMPORAL_OUTPUT \
+    --data_dir              $TEMPORAL_DATA \
+    --json_list             dataset_swincross_temporal.json \
+    --infer_overlap         0.7 \
+    --in_channels           2 \
+    --out_channels          3 \
+    --roi_x 96 --roi_y 96 --roi_z 96 \
+    --workers               4 \
+    2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_temporal.log
+

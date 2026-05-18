@@ -10,6 +10,8 @@
 # limitations under the License.
 
 import argparse
+import csv                                                       # MODIFICATION: for per-class Dice CSV output
+import json
 import math                                                      # MODIFICATION: needed for ceil in small-object threshold
 import os
 import warnings
@@ -79,6 +81,37 @@ def _remove_small_objects_physical(pred_np: np.ndarray,
           f"({threshold_mm3:.1f} mm³ @ {voxel_vol_mm3:.3f} mm³/vox) | "
           f"voxels removed: {n_removed}")
     return pred_filtered
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# MODIFICATION: per-class Dice CSV writer
+# ---------------------------------------------------------------------------
+# Class index → human-readable name (matches SwinCross label convention)
+_CLASS_NAMES = {1: "GTVp", 2: "GTVn"}
+
+def _write_dice_csv(csv_path: str,
+                    rows: list,
+                    mode: str = "a") -> None:
+    """
+    Append per-case Dice results to a CSV file.
+
+    Each row in `rows` is a dict with keys:
+        case_id, GTVp_dice, GTVn_dice, mean_dice
+    where a value of None means the class was absent from both GT and prediction
+    (not scored), and 0.0 means the class was present/predicted but not matched.
+
+    The file is created with a header on first write (mode="w") and appended
+    to on subsequent calls (mode="a").  Callers pass mode="w" for the first
+    case written within a run, and "a" for all subsequent ones.
+    """
+    fieldnames = ["case_id", "GTVp_dice", "GTVn_dice", "mean_dice"]
+    write_header = (mode == "w") or not os.path.exists(csv_path)
+    with open(csv_path, mode, newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
 # ---------------------------------------------------------------------------
 
 parser = argparse.ArgumentParser(description='UNETR segmentation pipeline')
@@ -173,6 +206,30 @@ def main():
 
         if not os.path.exists(test_output_dir):
             os.makedirs(test_output_dir)
+
+        # -----------------------------------------------------------
+        # MODIFICATION: Build filename -> metadata lookup from JSON
+        # -----------------------------------------------------------
+        json_path = os.path.join(args.data_dir, args.json_list)
+        meta_lookup = {}
+        try:
+            with open(json_path, 'r') as f:
+                dataset_json = json.load(f)
+                # Look through standard MONAI splits
+                for split in ["training", "validation", "testing"]:
+                    if split in dataset_json:
+                        for item in dataset_json[split]:
+                            img_path = item.get("image", "")
+                            basename = os.path.basename(img_path)
+                            meta_lookup[basename] = item
+            print(f"Loaded metadata for {len(meta_lookup)} cases from {args.json_list}")
+        except Exception as e:
+            print(f"Warning: Could not load JSON metadata from {json_path}. Error: {e}")
+        # -----------------------------------------------------------
+
+        # MODIFICATION: path for the per-class Dice CSV; written alongside predictions
+        dice_csv_path = os.path.join(test_output_dir, "per_case_dice.csv")
+        first_csv_write = True   # controls header row — written once then appended
         
         for i, batch in enumerate(val_loader):
 
@@ -206,23 +263,81 @@ def main():
             val_outputs_np = val_outputs_tensor[:, 0, ...].numpy().astype(np.uint8)
 
             # --- 2. COMPUTATION OF DICE SCORE AND VOLUME ---
-            if not args.inference_only:
+            
+            # MODIFICATION: Fetch per-case GT availability
+            case_meta = meta_lookup.get(img_name, {})
+            # Default to checking global arg if metadata isn't found
+            case_gt_available = case_meta.get("gt_available", not args.inference_only)
+
+            if case_gt_available and not args.inference_only:
                 val_labels_np = val_labels.cpu().numpy()[:, 0, :, :, :]
                 tumor_volume = np.sum(val_labels_np)
                 print("number of tumors", count_objects(val_labels_np[0,:,:,:]))
 
-                dice_list_sub = []
-                for i in range(1, 3):
-                    if np.sum(val_labels_np[0] == i) > 0 or np.sum(val_outputs_np[0] == i) > 0:
-                        organ_Dice = dice(val_outputs_np[0] == i, val_labels_np[0] == i)
-                        dice_list_sub.append(organ_Dice)
-                
-                mean_dice = np.mean(dice_list_sub) if len(dice_list_sub) > 0 else 0.0
-                print("ImageName, Mean Organ Dice, and Tumor Volume: {}, {}, {}".format(img_name, mean_dice, tumor_volume))
+                # MODIFICATION: compute per-class Dice and track individually,
+                # then derive mean only over scored classes.
+                # A class is scored when either the GT or the prediction is non-empty
+                # for that class.  This correctly handles:
+                #   - N-only GT  → class 1 scored only if model also predicts label=1
+                #   - T-only GT  → class 2 scored only if model also predicts label=2
+                #   - Both absent → class excluded from mean (true negative, no penalty)
+                per_class_dice = {}   # int class → float dice (or None if not scored)
+                dice_list_sub  = []
+
+                for cls in range(1, args.out_channels):
+                    gt_present   = np.sum(val_labels_np[0] == cls) > 0
+                    pred_present = np.sum(val_outputs_np[0] == cls) > 0
+
+                    if gt_present or pred_present:
+                        cls_dice = dice(val_outputs_np[0] == cls, val_labels_np[0] == cls)
+                        per_class_dice[cls] = cls_dice
+                        dice_list_sub.append(cls_dice)
+                        print(f"   Class {cls} ({_CLASS_NAMES.get(cls, str(cls))}): "
+                              f"Dice = {cls_dice:.4f}  "
+                              f"[GT={'present' if gt_present else 'absent'}, "
+                              f"Pred={'present' if pred_present else 'absent'}]")
+                    else:
+                        per_class_dice[cls] = None
+                        print(f"   Class {cls} ({_CLASS_NAMES.get(cls, str(cls))}): "
+                              f"not scored (absent in both GT and prediction)")
+
+                mean_dice = np.mean(dice_list_sub) if dice_list_sub else 0.0
+                print("ImageName, Mean Organ Dice, and Tumor Volume: {}, {}, {}".format(
+                    img_name, mean_dice, tumor_volume))
                 dice_list_case.append(mean_dice)
+
+                # MODIFICATION: write per-class dice row to CSV
+                csv_row = {
+                    "case_id":   img_prefix,
+                    "GTVp_dice": per_class_dice.get(1),   # None = not scored
+                    "GTVn_dice": per_class_dice.get(2),   # None = not scored
+                    "mean_dice": mean_dice,
+                }
+                _write_dice_csv(
+                    dice_csv_path,
+                    [csv_row],
+                    mode="w" if first_csv_write else "a"
+                )
+                first_csv_write = False
+
             else:
                 mean_dice = None
-                print(f"ImageName: {img_name} (Inference only)")
+                per_class_dice = {}
+                print(f"ImageName: {img_name} (Inference only / No GT available)")
+                
+                # MODIFICATION: Write skipping row to CSV
+                csv_row = {
+                    "case_id":   img_prefix,
+                    "GTVp_dice": "no_gt_available",
+                    "GTVn_dice": "no_gt_available",
+                    "mean_dice": "no_gt_available",
+                }
+                _write_dice_csv(
+                    dice_csv_path,
+                    [csv_row],
+                    mode="w" if first_csv_write else "a"
+                )
+                first_csv_write = False
 
             # --- 3. CLEAN SAVING USING MONAI InvertD + SIMPLEITK ---
             batch["pred"] = val_outputs_tensor
@@ -246,9 +361,6 @@ def main():
                 # -------------------------------------------------------
                 # 3.A-bis: Recover original image spacing for physical
                 #          threshold, BEFORE transposing for SimpleITK.
-                #          We read the source file here (same path logic
-                #          as below) so we can call GetSpacing() once and
-                #          pass it to the filter.
                 # -------------------------------------------------------
                 img_tensor = item_inv["image"]
 
@@ -298,17 +410,32 @@ def main():
                 prediction_sitk.CopyInformation(ref_sitk)
 
                 # 3.D: Save to disk
+                # MODIFICATION: per-class Dice is now appended to the filename
+                # (GTVp then GTVn), replacing the single mean_dice field.
+                if mean_dice is not None:
+                    gtvp_str = (f"{per_class_dice.get(1):.2f}"
+                                if per_class_dice.get(1) is not None else "NA")
+                    gtvn_str = (f"{per_class_dice.get(2):.2f}"
+                                if per_class_dice.get(2) is not None else "NA")
+                    dsc_tag = f"T{gtvp_str}_N{gtvn_str}"
+                else:
+                    dsc_tag = "NA"
+
                 filename_output_path = os.path.join(
-                    test_output_dir, 
-                    f'{img_prefix.replace("_petct", "")}_dsc{round(mean_dice, 2) if mean_dice is not None else "NA"}_Pred.nii.gz'
+                    test_output_dir,
+                    f'{img_prefix.replace("_petct", "")}_dsc{dsc_tag}_Pred.nii.gz'
                 )
                 
                 sitk.WriteImage(prediction_sitk, filename_output_path)
                 print(f"✅ Saved perfectly with MONAI Invertd + SimpleITK: {filename_output_path}")            
             #####################
-            
+
         if not args.inference_only:
-            print("Overall Mean Dice: {}".format(np.mean(dice_list_case)))
+            if len(dice_list_case) > 0:
+                print("Overall Mean Dice: {}".format(np.mean(dice_list_case)))
+            else:
+                print("Overall Mean Dice: N/A (No valid GT cases evaluated)")
+            print(f"Per-case Dice CSV written to: {dice_csv_path}")
 
 if __name__ == '__main__':
     main()
