@@ -188,7 +188,16 @@ def main():
     elif args.saved_checkpoint == 'ckpt':
         config_sw = CONFIGS_sw_seg['SwinUNETR_CMFF-hecktor-v06']
         model = SwinUNETR_CrossModalityFusion_OutSum_6stageOuts(config_sw)
-        model_dict = torch.load(pretrained_pth)['state_dict']
+        
+        # Load the file safely
+        checkpoint = torch.load(pretrained_pth)
+        
+        # Check if it's a dictionary containing 'state_dict', or if it IS the state dict
+        if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+            model_dict = checkpoint['state_dict']
+        else:
+            model_dict = checkpoint  # Fallback for slim checkpoints
+            
         model.load_state_dict(model_dict)
 
     model.eval()
