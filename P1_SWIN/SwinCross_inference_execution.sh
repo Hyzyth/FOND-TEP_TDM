@@ -72,7 +72,7 @@ echo "GPU       : $CUDA_VISIBLE_DEVICES"
 #     --in_channels           2 \
 #     --out_channels          3 \
 #     --roi_x 96 --roi_y 96 --roi_z 96 \
-#     --workers               4 \
+#     --workers               2 \
 #     2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_best.log
 
 
@@ -90,7 +90,7 @@ echo "GPU       : $CUDA_VISIBLE_DEVICES"
 #     --in_channels           2 \
 #     --out_channels          3 \
 #     --roi_x 96 --roi_y 96 --roi_z 96 \
-#     --workers               4 \
+#     --workers               2 \
 #     2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_last.log
 
 
@@ -111,7 +111,7 @@ echo "GPU       : $CUDA_VISIBLE_DEVICES"
 #     --in_channels           2 \
 #     --out_channels          3 \
 #     --roi_x 96 --roi_y 96 --roi_z 96 \
-#     --workers               4 \
+#     --workers               2 \
 #     2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_testset.log
 
 
@@ -133,7 +133,7 @@ echo "GPU       : $CUDA_VISIBLE_DEVICES"
 #     --in_channels           2 \
 #     --out_channels          3 \
 #     --roi_x 96 --roi_y 96 --roi_z 96 \
-#     --workers               4 \
+#     --workers               2 \
 #     --inference_only         \
 #     2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_only_testset.log
 
@@ -152,7 +152,7 @@ CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
     --in_channels           2 \
     --out_channels          3 \
     --roi_x 96 --roi_y 96 --roi_z 96 \
-    --workers               4 \
+    --workers               2 \
     2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_best_overlap07.log
 
 
@@ -188,5 +188,43 @@ CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
     --in_channels           2 \
     --out_channels          3 \
     --roi_x 96 --roi_y 96 --roi_z 96 \
-    --workers               4 \
+    --workers               2 \
     2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_temporal.log
+
+# =============================================================================
+# STEP 3A — Enrich HECKTOR evaluation CSV
+#
+# Reads existing *_Pred.nii.gz files, infers any that are missing,
+# then writes per_case_dice_enriched.csv with volumes + vol. similarity.
+# =============================================================================
+CUDA_VISIBLE_DEVICES=0 python3.12 evaluate_predictions.py \
+    --pretrained_dir        ./runs/$MODEL_DIR \
+    --pretrained_model_name $MODEL_USED \
+    --output_dir            $INFERENCE_OUTPUT/best_model_overlap07 \
+    --data_dir              $PPDATA_FOLDER \
+    --json_list             dataset_swincross.json \
+    --infer_overlap         0.7 \
+    --in_channels           2 \
+    --out_channels          3 \
+    --roi_x 96 --roi_y 96 --roi_z 96 \
+    --workers               4 \
+    2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/evaluate_hecktor.log
+
+# =============================================================================
+# STEP 3B — Enrich TemPoRAL evaluation CSV  [ACTIVE]
+#
+# Same logic: existing predictions re-evaluated from disk, missing ones inferred.
+# Outputs per_case_dice_enriched.csv in $TEMPORAL_OUTPUT.
+# =============================================================================
+CUDA_VISIBLE_DEVICES=0 python3.12 evaluate_predictions.py \
+    --pretrained_dir        ./runs/$MODEL_DIR \
+    --pretrained_model_name $MODEL_USED \
+    --output_dir            $TEMPORAL_OUTPUT \
+    --data_dir              $TEMPORAL_DATA \
+    --json_list             dataset_swincross_temporal.json \
+    --infer_overlap         0.7 \
+    --in_channels           2 \
+    --out_channels          3 \
+    --roi_x 96 --roi_y 96 --roi_z 96 \
+    --workers               4 \
+    2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/evaluate_temporal.log

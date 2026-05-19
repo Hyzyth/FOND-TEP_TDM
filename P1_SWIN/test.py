@@ -13,6 +13,7 @@ import argparse
 import csv                                                       # MODIFICATION: for per-class Dice CSV output
 import json
 import math                                                      # MODIFICATION: needed for ceil in small-object threshold
+import gc
 import os
 import warnings
 import nibabel as nib
@@ -241,6 +242,9 @@ def main():
         first_csv_write = True   # controls header row — written once then appended
         
         for i, batch in enumerate(val_loader):
+            # Clean up memory from previous iteration
+            torch.cuda.empty_cache()
+            gc.collect()
 
             val_inputs = batch["image"].to(device)
             val_labels = batch["label"].to(device) if not args.inference_only else None
@@ -255,11 +259,13 @@ def main():
             img_prefix = img_name.split('.')[0]
 
             print("Debug : Before inference on case {}".format(img_name))
-            val_outputs = sliding_window_inference(val_inputs,
-                                                   (96, 96, 96),
-                                                   4,
-                                                   model,
-                                                   overlap=args.infer_overlap)
+            # Using autocast for mixed precision inference to save memory and speed up computation on compatible GPUs
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                val_outputs = sliding_window_inference(val_inputs,
+                                                      (96, 96, 96),
+                                                      1,
+                                                      model,
+                                                      overlap=args.infer_overlap)
             print("Debug : After inference on case {}".format(img_name))
 
             # --- 1. PREPARATION OF PREDICTIONS (MONAI tensor format) ---
