@@ -23,6 +23,7 @@ source swincross_env/bin/activate
 
 if [ -f requirements.txt ]; then
     uv pip install -r requirements.txt
+    uv pip install matplotlib seaborn pandas # Ensure plotting libs are installed
 else
     echo "requirements.txt not found! Aborting."
     exit 1
@@ -69,6 +70,13 @@ run_echo_val_temporal(){
     echo "║  SwinCross TemPoRAL Evaluation  ║"
     echo "╚═════════════════════════════════╝"
 }
+
+run_echo_plotting(){
+    echo "╔════════════════════╗"
+    echo "║  Metrics Plotting  ║"
+    echo "╚════════════════════╝"
+}
+
 # =============================================================================
 # 0. — Inference on dedicated test set
 # Requires dataset_swincross_testing_group.json built with:
@@ -96,8 +104,13 @@ run_echo_val_temporal(){
 #     --output_dir $HECKTOR_OUT \
 #     2>&1 | tee $HECKTOR_OUT/evaluation.log
 
+# run_echo_plotting
+# python3.12 plot_metrics.py \
+#     --csv_path "$HECKTOR_OUT/per_case_evaluation_rich.csv" \
+#     --output_dir "$HECKTOR_OUT/plots"
+
 # =============================================================================
-# 1. HECKTOR Inference & Evaluation (High Overlap)
+# 1. HECKTOR Inference, Evaluation & Plotting (High Overlap)
 # =============================================================================
 HECKTOR_OUT=/data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/hecktor_best_model_overlap07
 mkdir -p $HECKTOR_OUT
@@ -120,8 +133,13 @@ CUDA_VISIBLE_DEVICES=0 python3.12 evaluate_predictions.py \
     --output_dir $HECKTOR_OUT \
     2>&1 | tee $HECKTOR_OUT/evaluation.log
 
+run_echo_plotting
+python3.12 plot_metrics.py \
+    --csv_path "$HECKTOR_OUT/per_case_evaluation_rich.csv" \
+    --output_dir "$HECKTOR_OUT/plots"
+
 # =============================================================================
-# 2. TEMPORAL Zero-Shot Inference & Evaluation
+# 2. TEMPORAL Zero-Shot Inference, Evaluation & Plotting
 # =============================================================================
 TEMPORAL_OUT=/data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/temporal_zeroshot
 mkdir -p $TEMPORAL_OUT
@@ -144,13 +162,17 @@ CUDA_VISIBLE_DEVICES=0 python3.12 evaluate_predictions.py \
     --output_dir $TEMPORAL_OUT \
     2>&1 | tee $TEMPORAL_OUT/evaluation.log
 
+run_echo_plotting
+python3.12 plot_metrics.py \
+    --csv_path "$TEMPORAL_OUT/per_case_evaluation_rich.csv" \
+    --output_dir "$TEMPORAL_OUT/plots"
+
 # =============================================================================
-# Automated Metric Stratification via AWK
+# Automated Metric Stratification via AWK + Plotting per stratum
 # =============================================================================
-# --- Generate Timepoint Sub-reports for TemPoRAL ---
 RICH_CSV="$TEMPORAL_OUT/per_case_evaluation_rich.csv"
 if [ -f "$RICH_CSV" ]; then
-    echo "=== Generating Timepoint Sub-reports ==="
+    echo "=== Generating Timepoint Sub-reports & Plots ==="
     HEADER=$(head -1 "$RICH_CSV")
     TP_COL=$(head -1 "$RICH_CSV" | tr ',' '\n' | grep -n "^timepoint$" | cut -d: -f1)
 
@@ -165,6 +187,12 @@ if [ -f "$RICH_CSV" ]; then
             } > "$SUB_CSV"
             N=$(tail -n+2 "$SUB_CSV" | wc -l)
             echo "  Generated $tp report: $SUB_CSV ($N cases)"
+            
+            # Plot the subset dynamically!
+            echo "  Plotting sub-report: $tp"
+            python3.12 plot_metrics.py \
+                --csv_path "$SUB_CSV" \
+                --output_dir "$TEMPORAL_OUT/plots_${tp}"
         done
     fi
 fi
