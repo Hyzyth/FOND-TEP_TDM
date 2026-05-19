@@ -175,13 +175,13 @@ def main():
                 val_outputs = sliding_window_inference(val_inputs, (96, 96, 96), 4, model, overlap=args.infer_overlap)
 
         # --- 1. PREPARATION OF PREDICTIONS (MONAI tensor format) ---
-        val_outputs_tensor = torch.softmax(val_outputs, dim=1)
-        val_outputs_tensor = torch.argmax(val_outputs_tensor, dim=1, keepdim=True).cpu()
+        val_outputs_tensor = val_outputs.cpu()  # Move to CPU for post-processing and saving
+        val_outputs_tensor = torch.argmax(val_outputs_tensor, dim=1, keepdim=True)
 
         if hasattr(val_inputs, "meta"):
             val_outputs_tensor = MetaTensor(val_outputs_tensor, meta=val_inputs.meta)
 
-        # --- 3. CLEAN SAVING USING MONAI InvertD + SIMPLEITK ---
+        # --- 2. CLEAN SAVING USING MONAI InvertD + SIMPLEITK ---
         batch["pred"] = val_outputs_tensor
         invertd = Invertd(keys="pred", transform=val_loader.dataset.transform, orig_keys="image", nearest_interp=True, to_tensor=True)
         batch_inverted = [invertd(item) for item in decollate_batch(batch)]
@@ -189,7 +189,7 @@ def main():
         for item_inv in batch_inverted:
             pred_np_final = item_inv["pred"][0].cpu().numpy().astype(np.uint8)
 
-            # 3.A: Recover original image spacing for physical threshold, BEFORE transposing for SimpleITK.
+            # 2.A: Recover original image spacing for physical threshold, BEFORE transposing for SimpleITK.
             img_tensor = item_inv["image"]
 
             if hasattr(img_tensor, "meta") and "filename_or_obj" in img_tensor.meta:
@@ -216,10 +216,10 @@ def main():
             spacing_mm = ref_sitk.GetSpacing()   # (sx, sy, sz) in mm
             pred_np_final = _remove_small_objects_physical(pred_np_final, spacing_mm=spacing_mm)
 
-            # 3.B: Transpose Z,Y,X for SimpleITK (ITK axis order)
+            # 2.B: Transpose Z,Y,X for SimpleITK (ITK axis order)
             pred_np_sitk = pred_np_final.transpose(2, 1, 0)
                 
-            # 3.C: Build SimpleITK image and copy spatial metadata
+            # 2.C: Build SimpleITK image and copy spatial metadata
             prediction_sitk = sitk.GetImageFromArray(pred_np_sitk)
             prediction_sitk.CopyInformation(ref_sitk)
             
