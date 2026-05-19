@@ -1,13 +1,9 @@
 #!/bin/bash
 # =============================================================================
-# SwinCross Inference Script — SwinUNETR Cross-Modality Fusion
+# SwinCross Inference & Rich Evaluation Master Script
 # Project : ProjetMaster / StageM1_IA
 # Author  : Santiago (original), updated for Ethan's run
 # Updated : 2026-04
-#
-# Uses test.py — the MONAI Invertd + SimpleITK CopyInformation approach.
-# This is the most spatially correct output method: transforms are inverted
-# by MONAI, then the original LPS metadata is copied from the source SITK file.
 #
 # Data source  : /data/santiago/Datast001_HECKTOR_SwinCross/  (read-only)
 # Model weights: /data/ethan/SwinCross/hecktor_runs/<MODEL_DIR>/
@@ -36,11 +32,10 @@ fi
 # STEP 1 — Path configuration
 # =============================================================================
 
-PPDATA_FOLDER=/data/santiago/Datast001_HECKTOR_SwinCross/
-
-# Which model run to use for inference
 MODEL_DIR=ethan_hecktor_2000ep_run
 MODEL_USED=backup_checkpoints/model_280ep_dice0.6235_slim.pth
+HECKTOR_DATA=/data/santiago/Datast001_HECKTOR_SwinCross/
+TEMPORAL_DATA=/data/ethan/SwinCross/PP_temporal_dataset
 
 # Re-apply the symlink in case this script is run in a fresh shell
 mkdir -p /data/ethan/SwinCross/hecktor_runs
@@ -50,181 +45,128 @@ ln -sfn /data/ethan/SwinCross/hecktor_runs ./runs
 INFERENCE_OUTPUT=/data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/hecktor_2000ep_predictions
 mkdir -p $INFERENCE_OUTPUT
 
-echo "Model dir : /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/"
-echo "Output    : $INFERENCE_OUTPUT/"
-echo "GPU       : $CUDA_VISIBLE_DEVICES"
+#--- Shared info printout ---
+run_echo_infer_hecktor(){
+    echo "╔═══════════════════════════════╗"
+    echo "║  SwinCross HECKTOR Inference  ║"
+    echo "╚═══════════════════════════════╝"
+}
 
-# =============================================================================
-# STEP 2A — Inference on validation set
-#
-# --infer_overlap 0.5 : good accuracy / speed tradeoff; raise to 0.7 for finals
-# --json_list         : uses the same JSON as training (validation split)
-# To run on a dedicated held-out test set, point --json_list to
-#   dataset_swincross_testing_group.json (build it with test_or_inf_dataset_builer_spitk.py)
-# =============================================================================
-# CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
-#     --pretrained_dir        ./runs/$MODEL_DIR \
-#     --pretrained_model_name $MODEL_USED \
-#     --output_dir            $INFERENCE_OUTPUT/best_model \
-#     --data_dir              $PPDATA_FOLDER \
-#     --json_list             dataset_swincross.json \
-#     --infer_overlap         0.5 \
-#     --in_channels           2 \
-#     --out_channels          3 \
-#     --roi_x 96 --roi_y 96 --roi_z 96 \
-#     --workers               2 \
-#     2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_best.log
+run_echo_infer_temporal(){
+    echo "╔══════════════════════════════════════════╗"
+    echo "║  SwinCross TemPoRAL Zero-Shot Inference  ║"
+    echo "╚══════════════════════════════════════════╝"
+}
 
+run_echo_val_hecktor(){
+    echo "╔════════════════════════════════╗"
+    echo "║  SwinCross HECKTOR Evaluation  ║"
+    echo "╚════════════════════════════════╝"
+}
 
+run_echo_val_temporal(){
+    echo "╔═════════════════════════════════╗"
+    echo "║  SwinCross TemPoRAL Evaluation  ║"
+    echo "╚═════════════════════════════════╝"
+}
 # =============================================================================
-# STEP 2B — Inference using LAST model
-# Useful to compare last vs best when training is still converging.
-# =============================================================================
-# CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
-#     --pretrained_dir        ./runs/$MODEL_DIR \
-#     --pretrained_model_name $MODEL_USED \
-#     --output_dir            $INFERENCE_OUTPUT/last_model \
-#     --data_dir              $PPDATA_FOLDER \
-#     --json_list             dataset_swincross.json \
-#     --infer_overlap         0.5 \
-#     --in_channels           2 \
-#     --out_channels          3 \
-#     --roi_x 96 --roi_y 96 --roi_z 96 \
-#     --workers               2 \
-#     2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_last.log
-
-
-# =============================================================================
-# STEP 2C — Inference on dedicated test set
+# 0. — Inference on dedicated test set
 # Requires dataset_swincross_testing_group.json built with:
 #   python3.12 test_or_inf_dataset_builer_spitk.py \
-#       --input_folder /data/santiago/Datast001_HECKTOR_SwinCross/ \
+#       --input_folder HECKTOR_DATA \
 #       --json_name dataset_swincross_testing_group.json \
 # =============================================================================
+# HECKTOR_OUT=/data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_testset
+# mkdir -p $HECKTOR_OUT
+# run_echo_infer_hecktor
 # CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
 #     --pretrained_dir        ./runs/$MODEL_DIR \
 #     --pretrained_model_name $MODEL_USED \
-#     --output_dir            $INFERENCE_OUTPUT/test_set_inference \
-#     --data_dir              $PPDATA_FOLDER \
+#     --output_dir            $HECKTOR_OUT \
+#     --data_dir              $HECKTOR_DATA \
 #     --json_list             dataset_swincross_testing_group.json \
-#     --infer_overlap         0.7 \
-#     --in_channels           2 \
-#     --out_channels          3 \
-#     --roi_x 96 --roi_y 96 --roi_z 96 \
-#     --workers               2 \
-#     2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_testset.log
+#     --infer_overlap 0.7 --in_channels 2 --out_channels 3 \
+#     --roi_x 96 --roi_y 96 --roi_z 96 --workers 2 --skip_existing \
+#     2>&1 | tee $HECKTOR_OUT/inference_testset.log
 
-
-# =============================================================================
-# STEP 2Cbis — Inference on dedicated test set with inference only (no dice, no metrics)
-# Requires dataset_swincross_testing_group.json built with:
-#   python3.12 test_or_inf_dataset_builer_spitk.py \
-#       --input_folder /data/santiago/Datast001_HECKTOR_SwinCross/ \
-#       --json_name dataset_swincross_testing_group.json \
-#       --inference_only
-# =============================================================================
-# CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
-#     --pretrained_dir        ./runs/$MODEL_DIR \
-#     --pretrained_model_name $MODEL_USED \
-#     --output_dir            $INFERENCE_OUTPUT/test_set_inference_only \
-#     --data_dir              $PPDATA_FOLDER \
-#     --json_list             dataset_swincross_testing_group.json \
-#     --infer_overlap         0.7 \
-#     --in_channels           2 \
-#     --out_channels          3 \
-#     --roi_x 96 --roi_y 96 --roi_z 96 \
-#     --workers               2 \
-#     --inference_only         \
-#     2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_only_testset.log
-
+# run_echo_val_hecktor
+# CUDA_VISIBLE_DEVICES=0 python3.12 evaluate_predictions.py \
+#     --data_dir $HECKTOR_DATA \
+#     --json_list dataset_swincross_testing_group.json \
+#     --output_dir $HECKTOR_OUT \
+#     2>&1 | tee $HECKTOR_OUT/evaluation.log
 
 # =============================================================================
-# STEP 2D — High-overlap inference (more accurate, slower)
-# Use for final results / paper figures.
+# 1. HECKTOR Inference & Evaluation (High Overlap)
 # =============================================================================
+HECKTOR_OUT=/data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/hecktor_best_model_overlap07
+mkdir -p $HECKTOR_OUT
+
+run_echo_infer_hecktor
 CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
-    --pretrained_dir        ./runs/$MODEL_DIR \
+    --pretrained_dir ./runs/$MODEL_DIR \
     --pretrained_model_name $MODEL_USED \
-    --output_dir            $INFERENCE_OUTPUT/best_model_overlap07 \
-    --data_dir              $PPDATA_FOLDER \
-    --json_list             dataset_swincross.json \
-    --infer_overlap         0.7 \
-    --in_channels           2 \
-    --out_channels          3 \
-    --roi_x 96 --roi_y 96 --roi_z 96 \
-    --workers               2 \
-    2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_best_overlap07.log
+    --output_dir $HECKTOR_OUT \
+    --data_dir $HECKTOR_DATA \
+    --json_list dataset_swincross.json \
+    --infer_overlap 0.7 --in_channels 2 --out_channels 3 \
+    --roi_x 96 --roi_y 96 --roi_z 96 --workers 2 --skip_existing \
+    2>&1 | tee $HECKTOR_OUT/inference.log
 
+run_echo_val_hecktor
+CUDA_VISIBLE_DEVICES=0 python3.12 evaluate_predictions.py \
+    --data_dir $HECKTOR_DATA \
+    --json_list dataset_swincross.json \
+    --output_dir $HECKTOR_OUT \
+    2>&1 | tee $HECKTOR_OUT/evaluation.log
 
 # =============================================================================
-# STEP 2E — Zero-shot inference on TemPoRAL internal database
-#
-# Prerequisite: run dataset_builder_TEMPORAL.py first to build the preprocessed
-# dataset and JSON:
-#
-#   python3.12 dataset_builder_TEMPORAL.py \
-#       --input_folder  /data/santiago/Database_nifti_TEMPORAL \
-#       --output_folder /data/ethan/SwinCross/PP_temporal_dataset \
-#       --json_name     dataset_swincross_temporal.json
-#
-# Notes:
-#   --data_dir  must point to the temporal output folder because all JSON
-#               paths (imagesTs/…, labelsTs/…) are relative to it.
-#   --json_list names the JSON file *inside* that folder.
-#   test.py writes per_case_dice.csv alongside predictions for direct
-#   comparison with the nnUNet evaluation in evaluation_report_temporal_analyse.xlsx.
+# 2. TEMPORAL Zero-Shot Inference & Evaluation
 # =============================================================================
-TEMPORAL_DATA=/data/ethan/SwinCross/PP_temporal_dataset
-TEMPORAL_OUTPUT=$INFERENCE_OUTPUT/temporal_zeroshot
-mkdir -p $TEMPORAL_OUTPUT
+TEMPORAL_OUT=/data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/temporal_zeroshot
+mkdir -p $TEMPORAL_OUT
 
+run_echo_infer_temporal
 CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
-    --pretrained_dir        ./runs/$MODEL_DIR \
+    --pretrained_dir ./runs/$MODEL_DIR \
     --pretrained_model_name $MODEL_USED \
-    --output_dir            $TEMPORAL_OUTPUT \
-    --data_dir              $TEMPORAL_DATA \
-    --json_list             dataset_swincross_temporal.json \
-    --infer_overlap         0.7 \
-    --in_channels           2 \
-    --out_channels          3 \
-    --roi_x 96 --roi_y 96 --roi_z 96 \
-    --workers               2 \
-    2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_temporal.log
+    --output_dir $TEMPORAL_OUT \
+    --data_dir $TEMPORAL_DATA \
+    --json_list dataset_swincross_temporal.json \
+    --infer_overlap 0.7 --in_channels 2 --out_channels 3 \
+    --roi_x 96 --roi_y 96 --roi_z 96 --workers 2 --skip_existing \
+    2>&1 | tee $TEMPORAL_OUT/inference.log
+
+run_echo_val_temporal
+CUDA_VISIBLE_DEVICES=0 python3.12 evaluate_predictions.py \
+    --data_dir $TEMPORAL_DATA \
+    --json_list dataset_swincross_temporal.json \
+    --output_dir $TEMPORAL_OUT \
+    2>&1 | tee $TEMPORAL_OUT/evaluation.log
 
 # =============================================================================
-# STEP 3A — Enrich HECKTOR evaluation CSV
-#
-# Reads existing *_Pred.nii.gz files, infers any that are missing,
-# then writes per_case_dice_enriched.csv with volumes + vol. similarity.
+# Automated Metric Stratification via AWK
 # =============================================================================
-CUDA_VISIBLE_DEVICES=0 python3.12 evaluate_predictions.py \
-    --pretrained_dir        ./runs/$MODEL_DIR \
-    --pretrained_model_name $MODEL_USED \
-    --output_dir            $INFERENCE_OUTPUT/best_model_overlap07 \
-    --data_dir              $PPDATA_FOLDER \
-    --json_list             dataset_swincross.json \
-    --infer_overlap         0.7 \
-    --in_channels           2 \
-    --out_channels          3 \
-    --roi_x 96 --roi_y 96 --roi_z 96 \
-    --workers               4 \
-    2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/evaluate_hecktor.log
+# --- Generate Timepoint Sub-reports for TemPoRAL ---
+RICH_CSV="$TEMPORAL_OUT/per_case_evaluation_rich.csv"
+if [ -f "$RICH_CSV" ]; then
+    echo "=== Generating Timepoint Sub-reports ==="
+    HEADER=$(head -1 "$RICH_CSV")
+    TP_COL=$(head -1 "$RICH_CSV" | tr ',' '\n' | grep -n "^timepoint$" | cut -d: -f1)
 
-# =============================================================================
-# STEP 3B — Enrich TemPoRAL evaluation CSV  [ACTIVE]
-#
-# Same logic: existing predictions re-evaluated from disk, missing ones inferred.
-# Outputs per_case_dice_enriched.csv in $TEMPORAL_OUTPUT.
-# =============================================================================
-CUDA_VISIBLE_DEVICES=0 python3.12 evaluate_predictions.py \
-    --pretrained_dir        ./runs/$MODEL_DIR \
-    --pretrained_model_name $MODEL_USED \
-    --output_dir            $TEMPORAL_OUTPUT \
-    --data_dir              $TEMPORAL_DATA \
-    --json_list             dataset_swincross_temporal.json \
-    --infer_overlap         0.7 \
-    --in_channels           2 \
-    --out_channels          3 \
-    --roi_x 96 --roi_y 96 --roi_z 96 \
-    --workers               4 \
-    2>&1 | tee /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/evaluate_temporal.log
+    if [ -n "$TP_COL" ]; then
+        UNIQUE_TPS=$(tail -n+2 "$RICH_CSV" | awk -F',' -v col="$TP_COL" '{print $col}' | sort -u | grep -v '^$')
+        
+        for tp in $UNIQUE_TPS; do
+            SUB_CSV="$TEMPORAL_OUT/per_case_rich_${tp}.csv"
+            {
+                echo "$HEADER"
+                grep -v "^case_id" "$RICH_CSV" | awk -F',' -v col="$TP_COL" -v tp="$tp" '$col == tp'
+            } > "$SUB_CSV"
+            N=$(tail -n+2 "$SUB_CSV" | wc -l)
+            echo "  Generated $tp report: $SUB_CSV ($N cases)"
+        done
+    fi
+fi
+
+echo "Pipeline Complete."
