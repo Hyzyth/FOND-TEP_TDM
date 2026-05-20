@@ -22,6 +22,7 @@ from scipy import ndimage
 from monai.data import MetaTensor, decollate_batch
 from monai.inferers.utils import sliding_window_inference
 from monai.transforms import Invertd, RemoveSmallObjects
+from skimage.segmentation import clear_border
 from data_utils import get_loader
 from networks.SwinTransModels import CONFIGS as CONFIGS_sw_seg
 from networks.SwinTransModels import *
@@ -30,6 +31,34 @@ warnings.filterwarnings("ignore")
 
 # Physical threshold: 0.125 cm³ = 125 mm³
 _SMALL_OBJ_THRESHOLD_MM3 = 125.0   # 0.125 cm³
+
+def _remove_border_objects(pred_np: np.ndarray, bg_val: int = 0) -> np.ndarray:
+    """
+    Remove connected components that touch the border of the volume.
+    Processes each class independently to avoid wiping out entire classes.
+    """
+    pred_filtered = np.zeros_like(pred_np)
+    
+    for cls in np.unique(pred_np):
+        if cls == bg_val:
+            continue
+            
+        # CRITICAL: Keep this as a boolean array! 
+        # This forces clear_border to isolate connected components 
+        # instead of deleting the entire class at once.
+        binary_bool_mask = (pred_np == cls) 
+        
+        # Apply clear_border to the boolean mask
+        cleared_mask = clear_border(binary_bool_mask)
+        
+        # Reconstruct the prediction array
+        pred_filtered[cleared_mask] = cls
+
+    n_removed = int((pred_np > 0).sum()) - int((pred_filtered > 0).sum())
+    if n_removed > 0:
+        print(f"   [ClearBorder] voxels removed: {n_removed}")
+        
+    return pred_filtered
 
 def _remove_small_objects_physical(pred_np: np.ndarray,
                                    spacing_mm: tuple,
@@ -214,7 +243,9 @@ def main():
                 ref_sitk = original_sitk
 
             spacing_mm = ref_sitk.GetSpacing()   # (sx, sy, sz) in mm
-            pred_np_final = _remove_small_objects_physical(pred_np_final, spacing_mm=spacing_mm)
+
+            pred_np_final = _remove_border_objects(pred_np_final)   # Remove border-touching objects first
+            pred_np_final = _remove_small_objects_physical(pred_np_final, spacing_mm=spacing_mm)    # Remove small objects
 
             # 2.B: Transpose Z,Y,X for SimpleITK (ITK axis order)
             pred_np_sitk = pred_np_final.transpose(2, 1, 0)

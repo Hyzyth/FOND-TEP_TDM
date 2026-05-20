@@ -36,7 +36,7 @@ fi
 MODEL_DIR=ethan_hecktor_2000ep_run
 MODEL_USED=backup_checkpoints/model_280ep_dice0.6235_slim.pth
 HECKTOR_DATA=/data/santiago/Datast001_HECKTOR_SwinCross/
-TEMPORAL_DATA=/data/ethan/SwinCross/PP_temporal_dataset
+TEMPORAL_DATA=/data/ethan/PP_temporal_dataset_SwinCross/
 
 # Re-apply the symlink in case this script is run in a fresh shell
 mkdir -p /data/ethan/SwinCross/hecktor_runs
