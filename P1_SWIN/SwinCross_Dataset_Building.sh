@@ -30,4 +30,6 @@ fi
 # Run dataset builder
 # =============================================================================
 
-python3.12 dataset_builder_TEMPORAL.py
+# python3.12 dataset_builder_simpleITK.py     # Build HECKTOR dataset with SimpleITK
+
+python3.12 dataset_builder_TEMPORAL.py      # Build TemPoRAL dataset

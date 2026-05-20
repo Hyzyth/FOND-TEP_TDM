@@ -50,7 +50,7 @@ import numpy as np
 
 # ── Defaults ────────────────────────────────────────────────────────────────
 DEFAULT_INPUT  = "/data/santiago/Database_nifti_TEMPORAL"
-DEFAULT_OUTPUT = "/data/ethan/SwinCross/PP_temporal_dataset"
+DEFAULT_OUTPUT = "/data/ethan/PP_temporal_dataset_SwinCross"
 DEFAULT_JSON   = "dataset_swincross_temporal.json"
 
 # ── Timepoint normalisation map ──────────────────────────────────────────────
@@ -67,8 +67,8 @@ TIMEPOINT_MAP = {
     "post":         "post", "Post":         "post",
     "tep_post":     "post", "TEP_post":     "post", "TEPpost": "post",
     # intermediate dose scans (20 Gy / 40 Gy)
-    "20":           "20gy", "20_Gy":        "20gy",
-    "tep_40":       "40gy", "TEP_40":       "40gy", "TEP40":   "40gy",
+    "20":           "20gy", "20_Gy":        "20gy", "TEP_20":       "20gy",
+    "40":           "40gy", "tep_40":       "40gy", "TEP_40":       "40gy", "TEP40":       "40gy",
 }
 
 
