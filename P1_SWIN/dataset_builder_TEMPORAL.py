@@ -24,6 +24,17 @@ The script:
      Each entry carries has_gtv_t and has_gtv_n boolean flags for
      per-class Dice evaluation downstream.
 
+Dataset structure assumed:
+  <input_folder>/
+    <patient_id>/         ← purely numeric (1 … 127)
+      <timepoint_dir>/    ← must be a key in TIMEPOINT_MAP; others are skipped
+        <study_date>/
+          CT_*.nii.gz
+          SUVbwPT_*.nii.gz  (preferred)  or  PT_*.nii.gz
+          CT_RTStruct*/
+            T.nii.gz  /  GTV T.nii.gz   (or in T/ sub-dir)
+            N.nii.gz  /  GTV N.nii.gz   (or in N/ sub-dir)
+
 Usage:
     python3 dataset_builder_temporal.py                          # defaults
     python3 dataset_builder_temporal.py --timepoints pre,per    # filter
@@ -62,8 +73,7 @@ TIMEPOINT_MAP = {
 
 
 def normalize_timepoint(name: str) -> str:
-    """Return a canonical timepoint label, or the lowercased raw name."""
-    return TIMEPOINT_MAP.get(name, name.lower().replace(" ", "_"))
+    return TIMEPOINT_MAP.get(name, "")   # "" signals: skip this folder
 
 
 def is_numeric_patient(name: str) -> bool:
@@ -75,9 +85,12 @@ def is_numeric_patient(name: str) -> bool:
 
 def scan_study_dir(directory: str):
     """
-    Return (ct_files, pet_files, rtstruct_dirs) for a given study folder.
-    SUVbwPT files are placed first in pet_files (preferred over raw PT).
-    Only CT_RTStruct_* subdirs are considered for GT (not PET_RTStruct_*).
+    Return (ct_files, pet_files, ct_rtstruct_dirs) for a given study folder.
+
+    Notes:
+      - SUVbwPT files are inserted at index 0 (preferred over raw PT).
+      - Only CT_RTStruct* directories are returned; PET_RTStruct* is ignored
+        because it has different resolution from the inference output.
     """
     ct_files, pet_files, rtstruct_dirs = [], [], []
 
@@ -94,63 +107,109 @@ def scan_study_dir(directory: str):
                 pet_files.insert(0, full)          # preferred
             elif entry.startswith("PT_"):
                 pet_files.append(full)
-            elif entry.startswith("CT_"):          # plain CT (not RTStruct)
+            elif entry.startswith("CT_") and "RTStruct" not in entry:
                 ct_files.append(full)
 
-        elif os.path.isdir(full) and entry.startswith("CT_RTStruct"):
-            rtstruct_dirs.append(full)
+        elif os.path.isdir(full) and entry.lower().startswith("ct_rtstruct"):
+            rtstruct_dirs.append(full)             # PET_RTStruct excluded
 
     return ct_files, pet_files, rtstruct_dirs
+
+
+def _classify_name(name: str) -> str:
+    """
+    Classify a file/folder name (lowercased, stripped) as 't', 'n', or ''.
+
+    Tumor (T) patterns:  t, tumor, gtv_t, gtv-t, gtv t, primary
+    Node  (N) patterns:  n, node, nodal, nodule, gtv_n, gtv-n, gtv n, lymph
+    """
+    clean = re.sub(r"[\s_\-]", "", name.lower())
+    clean = clean.replace(".nii.gz", "").replace(".nii", "")
+
+    T_PATTERNS = {"t", "tumor", "tumour", "gtvt", "primary", "primarytumor"}
+    N_PATTERNS = {"n", "node", "nodal", "nodule", "gtvn", "lymph", "lymphnode",
+                  "lymphnodegtv"}
+
+    if clean in T_PATTERNS:
+        return "t"
+    if clean in N_PATTERNS:
+        return "n"
+    return ""
 
 
 def find_gt_masks(rtstruct_dir: str):
     """
     Return (t_path, n_path) from a CT_RTStruct_* directory.
-    Handles both 'T.nii.gz' / 'N.nii.gz' and 'GTV T.nii.gz' / 'GTV N.nii.gz'.
+
+    Handles two layouts:
+      A) Files directly in the rtstruct dir:
+           T.nii.gz / GTV T.nii.gz / Tumor.nii.gz / …
+           N.nii.gz / GTV N.nii.gz / Nodule.nii.gz / …
+      B) One sub-directory per structure, each containing one .nii.gz:
+           T/   something.nii.gz
+           N/   something.nii.gz
     """
     t_path = n_path = None
+
     try:
-        files = os.listdir(rtstruct_dir)
+        entries = sorted(os.listdir(rtstruct_dir))
     except Exception:
         return None, None
 
-    for f in files:
-        if not f.endswith(".nii.gz"):
+    # ── Pass A: direct .nii.gz files ──────────────────────────────────────
+    for entry in entries:
+        if not entry.endswith(".nii.gz"):
             continue
-        full = os.path.join(rtstruct_dir, f)
-        fl   = f.lower()
-        if fl in ("t.nii.gz", "gtv t.nii.gz"):
+        kind = _classify_name(entry)
+        full = os.path.join(rtstruct_dir, entry)
+        if kind == "t" and t_path is None:
             t_path = full
-        elif fl in ("n.nii.gz", "gtv n.nii.gz"):
+        elif kind == "n" and n_path is None:
             n_path = full
+
+    if t_path is not None or n_path is not None:
+        return t_path, n_path          # found at least one mask → done
+
+    # ── Pass B: sub-directories ────────────────────────────────────────────
+    for entry in entries:
+        sub_path = os.path.join(rtstruct_dir, entry)
+        if not os.path.isdir(sub_path):
+            continue
+        kind = _classify_name(entry)
+        if kind not in ("t", "n"):
+            continue
+        # Take the first .nii.gz inside the sub-directory
+        sub_niftis = sorted(
+            f for f in os.listdir(sub_path) if f.endswith(".nii.gz"))
+        if not sub_niftis:
+            continue
+        candidate = os.path.join(sub_path, sub_niftis[0])
+        if kind == "t" and t_path is None:
+            t_path = candidate
+        elif kind == "n" and n_path is None:
+            n_path = candidate
 
     return t_path, n_path
 
 
 def best_gt(rtstruct_dirs: list):
     """
-    Return (t_path, n_path) from the RTStruct dirs.
+    Return (t_path, n_path).
 
-    Strategy:
-      - Prefer the first (sorted) dir that contains a T mask; return
-        its T and N together.
-      - If no dir has a T mask but at least one has an N mask, return
-        (None, n_path) — a valid N-only case.
-      - Return (None, None) only when no mask of any kind is found.
-
-    NOTE: when len(rtstruct_dirs) > 1 the caller logs a warning so that
-    cases with competing annotations can be reviewed manually.
+    After dataset curation there should be exactly one CT_RTStruct dir per
+    study, so this function simply processes the first (and expected only) dir.
+    A fallback loop is kept in case the assumption breaks.
     """
     best_n_fallback = None
 
     for rdir in sorted(rtstruct_dirs):
         t, n = find_gt_masks(rdir)
         if t is not None:
-            return t, n           # T found — best case, stop here
+            return t, n          # T found — best case
         if n is not None and best_n_fallback is None:
-            best_n_fallback = n   # record first N-only dir as fallback
+            best_n_fallback = n  # N-only fallback
 
-    return None, best_n_fallback  # N-only or completely empty
+    return None, best_n_fallback
 
 
 # ── SimpleITK helpers ─────────────────────────────────────────────────────────
@@ -311,6 +370,11 @@ def main():
         for tp_raw in tp_dirs:
             tp_norm = normalize_timepoint(tp_raw)
 
+            # ── Skip unrecognised / unclassed timepoint folders ────────────
+            if not tp_norm:
+                print(f"  ⏭  Skipping unclassed folder: {pat_id}/{tp_raw}")
+                continue
+
             if allowed_tp and tp_norm not in allowed_tp:
                 continue
 
@@ -332,7 +396,8 @@ def main():
                     continue
 
                 ct_path  = ct_files[0]
-                pet_path = pet_files[0]  # SUVbwPT first if available
+                pet_path = pet_files[0]    # SUVbwPT first if available
+                pet_type = "SUVbw" if "SUVbw" in os.path.basename(pet_path) else "PT"
                 
                 # ── Determine GT availability ──────────────────────────────
                 # Cases without any RTStruct dir, or where no mask file is
@@ -364,12 +429,11 @@ def main():
                     else:
                         gt_reason = "ok"
 
-                gt_available = gt_reason == "ok" or gt_reason in ("n_only", "t_only")
+                gt_available = gt_reason in ("ok", "n_only", "t_only")
 
                 # ── Log what we found ──────────────────────────────────────
                 study_date = os.path.basename(study_dir).replace("__Studies", "")
                 case_id    = f"pat{pat_id}_{tp_norm}_{study_date}"
-                pet_type   = "SUVbw" if "SUVbw" in os.path.basename(pet_path) else "PT"
 
                 if gt_reason == "no_rtstruct_dir":
                     print(f"  ⚠  {case_id}  [{pet_type}] — no RTStruct dir "
