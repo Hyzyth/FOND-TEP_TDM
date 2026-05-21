@@ -1,15 +1,15 @@
 import os
 import json
 import shutil
-import SimpleITK as sitk  # <--- On remplace Nibabel par le patron du game
+import SimpleITK as sitk
 import random
 import argparse
 
 # =================CONFIGURATION=================
 # GITHUB dirs par défaut
-INPUT_FOLDER = "Task_1_15examples"
-OUTPUT_FOLDER = "Dataset_Final_SwinCross_SITK" # J'ai changé le nom pour différencier
-JSON_FILENAME = "dataset_swincross.json"
+INPUT_FOLDER = "/data/santiago/HECKTOR_data/2025"
+OUTPUT_FOLDER = "/data/ethan/PP_hecktor_dataset_SwinCross"
+JSON_FILENAME = "dataset_swincross_hecktor.json"
 
 VAL_SPLIT = 0.2
 SEED = 42
