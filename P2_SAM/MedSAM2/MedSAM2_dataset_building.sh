@@ -53,44 +53,56 @@ fi
 # STEP 1 — Path configuration
 # =============================================================================
 
-DATA_DIR=/data/santiago/HECKTOR_data/2025/Task_1_segmentation
-OUTPUT_DIR=/data/ethan/MedSAM2/hecktor_npz
+HECKTOR_DATA_DIR=/data/santiago/HECKTOR_data/2025/Task_1_segmentation
+TEMPORAL_DATA_DIR=/data/santiago/Database_nifti_TEMPORAL
+HECKTOR_OUTPUT_DIR=/data/ethan/MedSAM2/hecktor_npz
+TEMPORAL_OUTPUT_DIR=/data/ethan/MedSAM2/temporal_npz
 
-mkdir -p "$OUTPUT_DIR"
-
-echo "========================================"
-echo "  MedSAM2 × HECKTOR — NPZ preparation"
-echo "  Source  : $DATA_DIR"
-echo "  Output  : $OUTPUT_DIR"
-echo "========================================"
+mkdir -p "$HECKTOR_OUTPUT_DIR"
+mkdir -p "$TEMPORAL_OUTPUT_DIR"
 
 # =============================================================================
 # STEP 2 — Run the NPZ converter
-#
-# Key parameters:
-#   --val_ratio 0.2      : 20 % of patients go to val/
-#   --seed 42            : reproducible split
-#   --ct_low / --ct_high : H&N soft-tissue window [-200, 800] HU
-#   --pet_suv_max 0      : per-patient 99th-percentile SUV normalisation
-#   --crop_margin 5      : keep 5 axial slices above/below the tumour
-#
-# To use a fixed SUV ceiling instead of per-patient percentile, set e.g.
-#   --pet_suv_max 10.0
 # =============================================================================
 
-python3.10 data_preparation/prepare_hecktor_npz.py \
-    --data_dir   "$DATA_DIR" \
-    --output_dir "$OUTPUT_DIR" \
-    --val_ratio  0.2 \
-    --seed       42 \
-    --ct_low    -200 \
-    --ct_high    800 \
-    --pet_suv_max 0.0 \
-    --crop_margin 5 \
-    2>&1 | tee "$OUTPUT_DIR/preparation.log"
+# echo "========================================"
+# echo "  MedSAM2 × HECKTOR — NPZ preparation"
+# echo "  Source  : $HECKTOR_DATA_DIR"
+# echo "  Output  : $HECKTOR_OUTPUT_DIR"
+# echo "========================================"
+
+# python3.10 data_preparation/prepare_hecktor_npz.py \
+#     --data_dir   "$HECKTOR_DATA_DIR" \
+#     --output_dir "$HECKTOR_OUTPUT_DIR" \
+#     --val_ratio  0.2 \
+#     --seed       42 \
+#     --ct_low    -200 \
+#     --ct_high    800 \
+#     --pet_suv_max 0.0 \
+#     --crop_margin 5 \
+#     2>&1 | tee "$HECKTOR_OUTPUT_DIR/preparation.log"
+
+# echo ""
+# echo "HECKTOR Dataset preparation complete."
+# echo "Split saved to: $HECKTOR_OUTPUT_DIR/data_split.json"
+# echo "Train NPZ:      $HECKTOR_OUTPUT_DIR/train/"
+# echo "Val NPZ:        $HECKTOR_OUTPUT_DIR/val/"
+
+echo "========================================="
+echo "  MedSAM2 × TEMPORAL — NPZ preparation"
+echo "  Source  : $TEMPORAL_DATA_DIR"
+echo "  Output  : $TEMPORAL_OUTPUT_DIR"
+echo "========================================="
+
+python3.10 data_preparation/prepare_temporal_npz.py \
+    --input_folder   "$TEMPORAL_DATA_DIR" \
+    --output_folder  "$TEMPORAL_OUTPUT_DIR" \
+    --timepoints     "all" \
+    --ct_low         -200 \
+    --ct_high        800 \
+    --crop_margin     5 \
+    2>&1 | tee "$TEMPORAL_OUTPUT_DIR/preparation.log"
 
 echo ""
-echo "Dataset preparation complete."
-echo "Split saved to: $OUTPUT_DIR/data_split.json"
-echo "Train NPZ:      $OUTPUT_DIR/train/"
-echo "Val NPZ:        $OUTPUT_DIR/val/"
+echo "TEMPORAL Dataset preparation complete."
+echo "Output NPZ: $TEMPORAL_OUTPUT_DIR/"
