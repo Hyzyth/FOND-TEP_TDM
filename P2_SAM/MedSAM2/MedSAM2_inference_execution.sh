@@ -26,6 +26,14 @@ if [ ! -d "medsam2_env" ]; then
 fi
 source medsam2_env/bin/activate
 
+if [ -f requirements.txt ]; then
+    uv pip install -r requirements.txt
+    uv pip install matplotlib seaborn pandas # Ensure plotting libs are installed
+else
+    echo "requirements.txt not found! Aborting."
+    exit 1
+fi
+
 # =============================================================================
 # STEP 1 — Path configuration
 # =============================================================================
@@ -48,11 +56,11 @@ ln -sfn /data/ethan/MedSAM2/runs ./runs
 GPU=0
 
 # ── Per-section skip flags (0=run, 1=skip) ───────────────────────────────────
-SKIP_GT=0
+SKIP_GT=1
 SKIP_PET=1
 SKIP_UNET=1
 SKIP_HYBRID=1
-SKIP_TEMPORAL_INFER=0
+SKIP_TEMPORAL_INFER=1
 SKIP_EVAL=0
 SKIP_PLOT=0
 SKIP_TP_STRAT=0
