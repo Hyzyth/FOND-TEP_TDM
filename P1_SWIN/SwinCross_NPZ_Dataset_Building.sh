@@ -37,18 +37,18 @@ else
     echo "requirements.txt not found — aborting." && exit 1
 fi
 
-# ── HECKTOR 2025 ──────────────────────────────────────────────────────────────
-echo ""
-echo "╔══════════════════════════════════╗"
-echo "║  HECKTOR → SwinCross NPZ build   ║"
-echo "╚══════════════════════════════════╝"
-python3.12 npz_version/prepare_hecktor_npz_swincross.py \
-    --data_dir   /data/santiago/HECKTOR_data/2025/Task_1_segmentation \
-    --output_dir /data/ethan/PP_hecktor_swincross_npz \
-    --json_name  dataset_swincross.json \
-    --val_split  0.2 \
-    --seed       42 \
-    2>&1 | tee /data/ethan/PP_hecktor_swincross_npz/preprocessing.log
+# # ── HECKTOR 2025 ──────────────────────────────────────────────────────────────
+# echo ""
+# echo "╔══════════════════════════════════╗"
+# echo "║  HECKTOR → SwinCross NPZ build   ║"
+# echo "╚══════════════════════════════════╝"
+# python3.12 npz_version/prepare_hecktor_npz_swincross.py \
+#     --data_dir   /data/santiago/HECKTOR_data/2025/Task_1_segmentation \
+#     --output_dir /data/ethan/PP_hecktor_swincross_npz \
+#     --json_name  dataset_swincross.json \
+#     --val_split  0.2 \
+#     --seed       42 \
+#     2>&1 | tee /data/ethan/PP_hecktor_swincross_npz/preprocessing.log
 
 # ── TemPoRAL zero-shot ────────────────────────────────────────────────────────
 echo ""
