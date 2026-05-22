@@ -44,7 +44,7 @@ NPZ_TEMPORAL=/data/ethan/MedSAM2/temporal_npz
 TEMPORAL_MANIFEST=$NPZ_TEMPORAL/manifest.json
 
 CHECKPOINT_BASE=./checkpoints/MedSAM2_latest.pt
-CHECKPOINT_FINETUNED=./runs/ethan_hecktor_finetuned/checkpoints/checkpoint_300_slim.pt
+CHECKPOINT_FINETUNED=./runs/ethan_hecktor_finetuned/300epoch/checkpoints/checkpoint_300_slim.pt
 CFG=sam2/configs/sam2.1_hiera_tiny_hecktor_infer.yaml
 PRED_ROOT=/data/ethan/MedSAM2/predictions
 PROPOSAL_MODEL=/data/ethan/MedSAM2/proposal_net/checkpoints/proposal_net_best.pt
@@ -56,11 +56,11 @@ ln -sfn /data/ethan/MedSAM2/runs ./runs
 GPU=0
 
 # ── Per-section skip flags (0=run, 1=skip) ───────────────────────────────────
-SKIP_GT=1
+SKIP_GT=0
 SKIP_PET=1
 SKIP_UNET=1
 SKIP_HYBRID=1
-SKIP_TEMPORAL_INFER=1
+SKIP_TEMPORAL_INFER=0
 SKIP_EVAL=0
 SKIP_PLOT=0
 SKIP_TP_STRAT=0
