@@ -112,13 +112,15 @@ def run_training(
             for val_data in val_loader:
                 init_val_steps += 1
                 with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=torch.cuda.is_available()):
-                    val_outputs_cpu = model_inferer(val_data["image"].to(device)).cpu()
-                val_labels_cpu = val_data["label"].cpu()
-                val_outputs_list = [post_pred(i) for i in decollate_batch(val_outputs_cpu)]
-                val_labels_list = [post_label(i) for i in decollate_batch(val_labels_cpu)]
-                init_val_loss += loss_func(val_outputs_cpu, val_labels_cpu).item()
+                    # The output of model_inferer is already on the GPU
+                    val_outputs_gpu = model_inferer(val_data["image"].to(device))
+                # Use .to(device) or .cuda() to move labels
+                val_labels_gpu = val_data["label"].to(device)
+                val_outputs_list = [post_pred(i) for i in decollate_batch(val_outputs_gpu)]
+                val_labels_list = [post_label(i) for i in decollate_batch(val_labels_gpu)]
+                init_val_loss += loss_func(val_outputs_gpu, val_labels_gpu).item()
                 acc_func(y_pred=val_outputs_list, y=val_labels_list)
-                del val_outputs_cpu, val_labels_cpu, val_outputs_list, val_labels_list
+                del val_outputs_gpu, val_labels_gpu, val_outputs_list, val_labels_list
         init_mean_acc = acc_func.aggregate().item()
         acc_func.reset()
         init_val_loss /= init_val_steps
@@ -238,25 +240,25 @@ def run_training(
                         dtype=torch.float16,
                         enabled=torch.cuda.is_available(),
                     ):
-                        val_outputs_cpu = model_inferer(
+                        val_outputs_gpu = model_inferer(
                             val_data["image"].to(device)
-                        ).cpu()
+                        )
 
-                    val_labels_cpu = val_data["label"].cpu()
+                    val_labels_gpu = val_data["label"].to(device)
 
                     val_outputs_list = [
-                        post_pred(i) for i in decollate_batch(val_outputs_cpu)
+                        post_pred(i) for i in decollate_batch(val_outputs_gpu)
                     ]
                     val_labels_list = [
-                        post_label(i) for i in decollate_batch(val_labels_cpu)
+                        post_label(i) for i in decollate_batch(val_labels_gpu)
                     ]
 
-                    val_loss_batch = loss_func(val_outputs_cpu, val_labels_cpu)
+                    val_loss_batch = loss_func(val_outputs_gpu, val_labels_gpu)
                     val_loss += val_loss_batch.item()
 
                     acc_func(y_pred=val_outputs_list, y=val_labels_list)
 
-                    del val_outputs_cpu, val_labels_cpu, val_outputs_list, val_labels_list
+                    del val_outputs_gpu, val_labels_gpu, val_outputs_list, val_labels_list
 
             mean_acc      = acc_func.aggregate().item()
             acc_func.reset()

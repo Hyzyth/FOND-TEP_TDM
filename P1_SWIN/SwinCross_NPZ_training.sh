@@ -36,6 +36,7 @@ EPOCH_NUMBER=1000
 # ── STEP 1 — Paths ────────────────────────────────────────────────────────────
 PPDATA_FOLDER=/data/ethan/PP_hecktor_swincross_npz
 JSON_LIST=dataset_swincross.json
+JSON_DEBUG=dataset_swincross_debug.json
 MODEL_DIR=HECKTOR_run_${EPOCH_NUMBER}_epoch
 
 mkdir -p /data/ethan/SwinCross
@@ -46,7 +47,7 @@ echo "Data    : $PPDATA_FOLDER"
 echo "Outputs : /data/ethan/SwinCross/$MODEL_DIR/"
 echo "GPU     : 0"
 
-# ── STEP 2A — Training from scratch  ──────────────────────────────────────────
+# # ── STEP 2A — Training from scratch  ──────────────────────────────────────────
 CUDA_VISIBLE_DEVICES=0 \
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 python3.12 -u npz_version/train.py \
@@ -56,7 +57,7 @@ python3.12 -u npz_version/train.py \
     --batch_size 2 \
     --val_every  20 \
     --workers    4 \
-    --cache_rate 1.0 \
+    --cache_rate 0.0 \
     --max_epochs $EPOCH_NUMBER \
     --warmup_epochs 50 \
     --RandFlipd_prob           0.5 \
@@ -86,7 +87,7 @@ python3.12 -u npz_version/train.py \
 #     --RandRotate90d_prob       0.5 \
 #     --RandScaleIntensityd_prob 0.2 \
 #     --RandShiftIntensityd_prob 0.2 \
-#     --cache_rate  1.0 \
+#     --cache_rate  0.0 \
 #     --workers     4 \
 #     --noamp \
 #     --save_checkpoint \
@@ -95,7 +96,7 @@ python3.12 -u npz_version/train.py \
 # ── STEP 2C — Quick debug run  [COMMENT OUT] ──────────────────────────────────
 # CUDA_VISIBLE_DEVICES=0 python3.12 npz_version/train.py \
 #     --data_dir   $PPDATA_FOLDER \
-#     --json_list  $JSON_LIST \
+#     --json_list  $JSON_DEBUG \
 #     --logdir     ethan_debug \
 #     --batch_size 2 \
 #     --cache_rate 0.0 \
