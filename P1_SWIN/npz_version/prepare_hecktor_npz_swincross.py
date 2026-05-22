@@ -89,22 +89,22 @@ def orient_to_ras(img: sitk.Image) -> sitk.Image:
     return f.Execute(img)
 
 
-def resample_to_spacing(img: sitk.Image,
-                         new_spacing: Tuple[float, float, float],
-                         is_label: bool) -> sitk.Image:
-    orig_sp = np.array(img.GetSpacing())
-    orig_sz = np.array(img.GetSize())
-    new_sz  = np.maximum(1, np.round(orig_sz * orig_sp / np.array(new_spacing))).astype(int)
-    r = sitk.ResampleImageFilter()
-    r.SetOutputSpacing(new_spacing)
-    r.SetSize(new_sz.tolist())
-    r.SetOutputOrigin(img.GetOrigin())
-    r.SetOutputDirection(img.GetDirection())
-    r.SetInterpolator(
-        sitk.sitkNearestNeighbor if is_label else sitk.sitkBSplineResamplerOrder3)
-    r.SetTransform(sitk.Transform())
-    r.SetDefaultPixelValue(0)
-    return r.Execute(img)
+# def resample_to_spacing(img: sitk.Image,      # not used in the final version
+#                          new_spacing: Tuple[float, float, float],
+#                          is_label: bool) -> sitk.Image:
+#     orig_sp = np.array(img.GetSpacing())
+#     orig_sz = np.array(img.GetSize())
+#     new_sz  = np.maximum(1, np.round(orig_sz * orig_sp / np.array(new_spacing))).astype(int)
+#     r = sitk.ResampleImageFilter()
+#     r.SetOutputSpacing(new_spacing)
+#     r.SetSize(new_sz.tolist())
+#     r.SetOutputOrigin(img.GetOrigin())
+#     r.SetOutputDirection(img.GetDirection())
+#     r.SetInterpolator(
+#         sitk.sitkNearestNeighbor if is_label else sitk.sitkBSplineResamplerOrder3)
+#     r.SetTransform(sitk.Transform())
+#     r.SetDefaultPixelValue(0)
+#     return r.Execute(img)
 
 
 def sitk_to_monai(img: sitk.Image) -> np.ndarray:
@@ -151,20 +151,15 @@ def process_patient(patient_dir: Path, pid: str) -> Optional[dict]:
     pet_ras = orient_to_ras(pet_orig)
     gt_ras  = orient_to_ras(gt_orig)
 
-    # ── Resample to 1 mm isotropic ───────────────────────────────────────
-    ct_1mm  = resample_to_spacing(ct_ras,  TARGET_SPACING, is_label=False)
-    pet_1mm = resample_to_spacing(pet_ras, TARGET_SPACING, is_label=False)
-    gt_1mm  = resample_to_spacing(gt_ras,  TARGET_SPACING, is_label=True)
-
-    # ── Store RAS 1mm metadata (needed to invert in test.py) ─────────────
-    ras_origin    = np.array(ct_1mm.GetOrigin(),    dtype=np.float64)
-    ras_direction = np.array(ct_1mm.GetDirection(), dtype=np.float64)
-    ras_size_itk  = np.array(ct_1mm.GetSize(),      dtype=np.int64)   # (nx, ny, nz)
+    # ── Store RAS metadata (needed to invert in test.py) ─────────────────
+    ras_origin    = np.array(ct_ras.GetOrigin(),    dtype=np.float64)
+    ras_direction = np.array(ct_ras.GetDirection(), dtype=np.float64)
+    ras_size_itk  = np.array(ct_ras.GetSize(),      dtype=np.int64)   # (nx, ny, nz)
 
     # ── Convert to MONAI spatial convention (R, A, S) ─────────────────────
-    ct_arr  = sitk_to_monai(ct_1mm).astype(np.float32)
-    pet_arr = sitk_to_monai(pet_1mm).astype(np.float32)
-    gt_arr  = sitk_to_monai(gt_1mm).astype(np.uint8)
+    ct_arr  = sitk_to_monai(ct_ras).astype(np.float32)
+    pet_arr = sitk_to_monai(pet_ras).astype(np.float32)
+    gt_arr  = sitk_to_monai(gt_ras).astype(np.uint8)
 
     # image: (2, R, A, S)   channel 0 = PET, channel 1 = CT
     image = np.stack([pet_arr, ct_arr], axis=0)

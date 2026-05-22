@@ -43,7 +43,7 @@ echo "╔═══════════════════════�
 echo "║  HECKTOR → SwinCross NPZ build   ║"
 echo "╚══════════════════════════════════╝"
 python3.12 npz_version/prepare_hecktor_npz_swincross.py \
-    --data_dir   /data/santiago/HECKTOR_data/2025 \
+    --data_dir   /data/santiago/HECKTOR_data/2025/Task_1_segmentation \
     --output_dir /data/ethan/PP_hecktor_swincross_npz \
     --json_name  dataset_swincross.json \
     --val_split  0.2 \

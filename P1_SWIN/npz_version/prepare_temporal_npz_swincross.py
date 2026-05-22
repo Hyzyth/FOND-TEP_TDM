@@ -185,17 +185,13 @@ def process_case(ct_path: str, pet_path: str,
     pet_ras = orient_to_ras(pet_orig)
     gt_ras  = orient_to_ras(gt_orig)
 
-    ct_1mm  = resample_to_spacing(ct_ras,  TARGET_SPACING, is_label=False)
-    pet_1mm = resample_to_spacing(pet_ras, TARGET_SPACING, is_label=False)
-    gt_1mm  = resample_to_spacing(gt_ras,  TARGET_SPACING, is_label=True)
+    ras_origin    = np.array(ct_ras.GetOrigin(),    dtype=np.float64)
+    ras_direction = np.array(ct_ras.GetDirection(), dtype=np.float64)
+    ras_size_itk  = np.array(ct_ras.GetSize(),      dtype=np.int64)
 
-    ras_origin    = np.array(ct_1mm.GetOrigin(),    dtype=np.float64)
-    ras_direction = np.array(ct_1mm.GetDirection(), dtype=np.float64)
-    ras_size_itk  = np.array(ct_1mm.GetSize(),      dtype=np.int64)
-
-    ct_arr  = sitk_to_monai(ct_1mm).astype(np.float32)
-    pet_arr = sitk_to_monai(pet_1mm).astype(np.float32)
-    gt_arr  = sitk_to_monai(gt_1mm).astype(np.uint8)
+    ct_arr  = sitk_to_monai(ct_ras).astype(np.float32)
+    pet_arr = sitk_to_monai(pet_ras).astype(np.float32)
+    gt_arr  = sitk_to_monai(gt_ras).astype(np.uint8)
 
     image = np.stack([pet_arr, ct_arr], axis=0)   # (2, R, A, S)
 
