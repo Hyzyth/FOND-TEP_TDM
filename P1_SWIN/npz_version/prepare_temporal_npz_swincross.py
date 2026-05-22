@@ -27,7 +27,7 @@ import SimpleITK as sitk
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent))
-from P1_SWIN.npz_version.prepare_hecktor_npz_swincross import (
+from prepare_hecktor_npz_swincross import (
     FOREGROUND_MARGIN,
     resample_to_reference, orient_to_ras, sitk_to_monai,
     to_ct_int16, to_pet_float16,
