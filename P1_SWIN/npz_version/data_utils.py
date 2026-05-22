@@ -123,8 +123,10 @@ class LoadNPZd(Transform):
 
         npz = np.load(npz_path, allow_pickle=False)
 
-        # image: (2, R, A, S)  float32
-        d["image"] = npz["image"].copy().astype(np.float32)
+        # Extract, cast back to float32, and fuse: (2, R, A, S) — ch0=PET, ch1=CT
+        pet_arr = npz["pet"].astype(np.float32)
+        ct_arr  = npz["ct"].astype(np.float32)
+        d["image"] = np.stack([pet_arr, ct_arr], axis=0)
 
         # label: (R, A, S) → (1, R, A, S)  int64   (channel dim expected by MONAI)
         d["label"] = npz["label"].copy().astype(np.int64)[np.newaxis]

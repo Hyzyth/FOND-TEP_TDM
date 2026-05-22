@@ -4,16 +4,14 @@ prepare_temporal_npz_swincross.py
 ==================================
 Offline preprocessing for SwinCross: converts Database_nifti_TEMPORAL to NPZ.
 
+Storage dtype optimisation: ct → int16, pet → float16  (same as HECKTOR script).
 File-discovery logic mirrors dataset_builder_TEMPORAL.py.
-Preprocessing (orient, resample, crop) mirrors prepare_hecktor_npz_swincross.py.
 All cases land in "validation" (zero-shot inference only).
 
-NPZ / JSON format identical to the HECKTOR script.
-
 Usage:
-  python data_preparation/prepare_temporal_npz_swincross.py
-  python data_preparation/prepare_temporal_npz_swincross.py --timepoints pre,per
-  python data_preparation/prepare_temporal_npz_swincross.py --dry_run
+  python npz_version/prepare_temporal_npz_swincross.py
+  python npz_version/prepare_temporal_npz_swincross.py --timepoints pre,per
+  python npz_version/prepare_temporal_npz_swincross.py --dry_run
 """
 
 import argparse
@@ -28,28 +26,25 @@ import numpy as np
 import SimpleITK as sitk
 from tqdm import tqdm
 
-# Re-use helpers from the HECKTOR script (same directory)
 sys.path.insert(0, str(Path(__file__).parent))
-from prepare_hecktor_npz_swincross import (
-    TARGET_SPACING, FOREGROUND_MARGIN,
-    resample_to_reference, orient_to_ras,
-    resample_to_spacing, sitk_to_monai,
+from P1_SWIN.npz_version.prepare_hecktor_npz_swincross import (
+    FOREGROUND_MARGIN,
+    resample_to_reference, orient_to_ras, sitk_to_monai,
+    to_ct_int16, to_pet_float16,
 )
 
-# ── Defaults ──────────────────────────────────────────────────────────────────
 DEFAULT_INPUT  = "/data/santiago/Database_nifti_TEMPORAL"
 DEFAULT_OUTPUT = "/data/ethan/PP_temporal_swincross_npz"
 DEFAULT_JSON   = "dataset_swincross_temporal.json"
 
-# ── Timepoint normalisation (identical to dataset_builder_TEMPORAL.py) ────────
 TIMEPOINT_MAP = {
     "pre":  "pre",  "Pre":  "pre",  "tep_pre":  "pre",  "TEP_pre":  "pre",
     "per":  "per",  "Per":  "per",  "tep_per":  "per",  "TEP_per":  "per",
     "Nouveau_dossier": "per",
     "post": "post", "Post": "post", "tep_post": "post", "TEP_post": "post",
     "TEPpost": "post",
-    "20":  "20gy", "20_Gy":  "20gy", "TEP_20":  "20gy",
-    "40":  "40gy", "tep_40": "40gy", "TEP_40":  "40gy", "TEP40":   "40gy",
+    "20": "20gy", "20_Gy": "20gy", "TEP_20": "20gy",
+    "40": "40gy", "tep_40": "40gy", "TEP_40": "40gy", "TEP40": "40gy",
 }
 
 
@@ -60,8 +55,7 @@ def normalize_timepoint(name: str) -> str:
 def is_numeric_patient(name: str) -> bool:
     return bool(re.fullmatch(r"\d+", name))
 
-
-# ── File-discovery helpers (mirrors dataset_builder_TEMPORAL.py) ──────────────
+# ── File-discovery helpers ────────────────────────────────────────────────────────────────
 
 def scan_study_dir(directory: str):
     ct_files, pet_files, rtstruct_dirs = [], [], []
@@ -85,11 +79,9 @@ def scan_study_dir(directory: str):
 
 def _classify_name(name: str) -> str:
     clean = re.sub(r"[\s_\-]", "", name.lower()).replace(".nii.gz", "").replace(".nii", "")
-    T_PATTERNS = {"t", "tumor", "tumour", "gtvt", "primary", "primarytumor"}
-    N_PATTERNS = {"n", "node", "nodal", "nodule", "gtvn", "lymph", "lymphnode", "lymphnodegtv"}
-    if clean in T_PATTERNS:
+    if clean in {"t", "tumor", "tumour", "gtvt", "primary", "primarytumor"}:
         return "t"
-    if clean in N_PATTERNS:
+    if clean in {"n", "node", "nodal", "nodule", "gtvn", "lymph", "lymphnode", "lymphnodegtv"}:
         return "n"
     return ""
 
@@ -150,7 +142,7 @@ def _same_grid(a: sitk.Image, b: sitk.Image) -> bool:
 def build_gt_sitk(t_path: Optional[str], n_path: Optional[str],
                   ct_orig: sitk.Image) -> sitk.Image:
     """Combine T (label=1) and N (label=2) masks onto the CT grid."""
-    mask_arr = np.zeros(ct_orig.GetSize()[::-1], dtype=np.uint8)   # (z, y, x)
+    mask_arr = np.zeros(ct_orig.GetSize()[::-1], dtype=np.uint8)
     if t_path:
         t_img = sitk.Cast(sitk.ReadImage(t_path), sitk.sitkUInt8)
         if not _same_grid(t_img, ct_orig):
@@ -193,31 +185,30 @@ def process_case(ct_path: str, pet_path: str,
     pet_arr = sitk_to_monai(pet_ras).astype(np.float32)
     gt_arr  = sitk_to_monai(gt_ras).astype(np.uint8)
 
-    image = np.stack([pet_arr, ct_arr], axis=0)   # (2, R, A, S)
-
-    fg_mask = (image[0] != 0) | (image[1] != 0)
+    fg_mask = (ct_arr != 0) | (pet_arr != 0)
     coords  = np.where(fg_mask)
     if len(coords[0]) == 0:
-        # No foreground: keep full volume rather than returning None
         crop_start = np.zeros(3, dtype=np.int64)
-        crop_end   = np.array(image.shape[1:], dtype=np.int64)
+        crop_end   = np.array(ct_arr.shape, dtype=np.int64)
     else:
         crop_start = np.maximum(
             0,
             np.array([c.min() for c in coords], dtype=np.int64) - FOREGROUND_MARGIN
         )
         crop_end = np.minimum(
-            np.array(image.shape[1:], dtype=np.int64),
+            np.array(ct_arr.shape, dtype=np.int64),
             np.array([c.max() + 1 for c in coords], dtype=np.int64) + FOREGROUND_MARGIN
         )
 
-    sl      = tuple(slice(int(s), int(e)) for s, e in zip(crop_start, crop_end))
-    image_c = image[(slice(None),) + sl]
-    label_c = gt_arr[sl]
+    sl     = tuple(slice(int(s), int(e)) for s, e in zip(crop_start, crop_end))
+    ct_c   = ct_arr[sl]
+    pet_c  = pet_arr[sl]
+    gt_c   = gt_arr[sl]
 
     return {
-        "image":         image_c,
-        "label":         label_c,
+        "ct":          to_ct_int16(ct_c),
+        "pet":         to_pet_float16(pet_c),
+        "label":       gt_c,
         "ras_origin":    ras_origin,
         "ras_direction": ras_direction,
         "ras_size_itk":  ras_size_itk,
@@ -227,20 +218,17 @@ def process_case(ct_path: str, pet_path: str,
         "orig_origin":   orig_origin,
         "orig_direction":orig_direction,
         "orig_size_itk": orig_size_itk,
-        "_gt_sitk_orig": gt_orig,  # original CT space, for evaluate_predictions.py
+        "_gt_sitk_orig": gt_orig,
     }
 
 
 def main():
-    ap = argparse.ArgumentParser(
-        description="TemPoRAL → SwinCross NPZ preprocessor"
-    )
+    ap = argparse.ArgumentParser(description="TemPoRAL → SwinCross NPZ (int16 CT / float16 PET)")
     ap.add_argument("--input_folder",  default=DEFAULT_INPUT)
     ap.add_argument("--output_folder", default=DEFAULT_OUTPUT)
     ap.add_argument("--json_name",     default=DEFAULT_JSON)
-    ap.add_argument("--timepoints",    default="all",
-                    help="Comma-separated canonical timepoints or 'all'")
-    ap.add_argument("--dry_run", action="store_true")
+    ap.add_argument("--timepoints",    default="all")
+    ap.add_argument("--dry_run",       action="store_true")
     args = ap.parse_args()
 
     allowed_tp = None if args.timepoints == "all" else set(args.timepoints.split(","))
@@ -250,7 +238,7 @@ def main():
             os.makedirs(os.path.join(args.output_folder, sub), exist_ok=True)
 
     json_data = {
-        "description": "Database_nifti_TEMPORAL — SwinCross NPZ zero-shot",
+        "description": "Database_nifti_TEMPORAL — SwinCross NPZ zero-shot (int16/f16)",
         "labels":      {"0": "background", "1": "GTVp", "2": "GTVn"},
         "training":    [],
         "validation":  [],
@@ -274,16 +262,13 @@ def main():
         for tp_raw in tp_dirs:
             tp_norm = normalize_timepoint(tp_raw)
             if not tp_norm:
-                print(f"  ⏭  Skipping unclassed: {pat_id}/{tp_raw}")
                 continue
             if allowed_tp and tp_norm not in allowed_tp:
                 continue
 
-            tp_path     = os.path.join(pat_path, tp_raw)
-            study_subs  = sorted(
-                os.path.join(tp_path, d) for d in os.listdir(tp_path)
-                if os.path.isdir(os.path.join(tp_path, d))
-            )
+            tp_path    = os.path.join(pat_path, tp_raw)
+            study_subs = sorted(os.path.join(tp_path, d) for d in os.listdir(tp_path)
+                                if os.path.isdir(os.path.join(tp_path, d)))
             search_dirs = study_subs if study_subs else [tp_path]
 
             for study_dir in search_dirs:
@@ -314,8 +299,7 @@ def main():
                 study_date   = os.path.basename(study_dir).replace("__Studies", "")
                 case_id      = f"pat{pat_id}_{tp_norm}_{study_date}"
 
-                flag = "✅" if gt_available else "⚠ "
-                print(f"  {flag} {case_id}  gt={gt_reason}")
+                print(f"  {'✅' if gt_available else '⚠ '} {case_id}  gt={gt_reason}")
 
                 npz_rel = f"npz/{case_id}.npz"
                 lbl_rel = f"labelsTs/{case_id}_gt.nii.gz"
@@ -328,7 +312,8 @@ def main():
                             continue
                         np.savez_compressed(
                             os.path.join(args.output_folder, npz_rel),
-                            image          = result["image"],
+                            ct             = result["ct"],
+                            pet            = result["pet"],
                             label          = result["label"],
                             ras_origin     = result["ras_origin"],
                             ras_direction  = result["ras_direction"],
@@ -365,9 +350,9 @@ def main():
         json_path = os.path.join(args.output_folder, args.json_name)
         with open(json_path, "w") as f:
             json.dump(json_data, f, indent=2)
-        print(f"\nDone. {ok} cases built, {skipped} skipped → {json_path}")
+        print(f"\nDone. {ok} cases, {skipped} skipped → {json_path}")
     else:
-        print(f"\n[dry-run] {ok} cases would be built, {skipped} skipped.")
+        print(f"\n[dry-run] {ok} cases would be built.")
 
 
 if __name__ == "__main__":

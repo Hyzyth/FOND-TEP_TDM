@@ -213,7 +213,11 @@ def main():
         # ── Load NPZ ──────────────────────────────────────────────────────
         print(f"→ [{idx+1}/{len(all_entries)}] {case_id}")
         npz_data = np.load(npz_path, allow_pickle=False)
-        image_np = npz_data["image"]        # (2, R, A, S) float32
+        
+        # Extract, cast to float32, and fuse (Channel 0 = PET, Channel 1 = CT)
+        pet_arr = npz_data["pet"].astype(np.float32)
+        ct_arr = npz_data["ct"].astype(np.float32)
+        image_np = np.stack([pet_arr, ct_arr], axis=0)
 
         # ── Lazy model load ───────────────────────────────────────────────
         if model is None:
