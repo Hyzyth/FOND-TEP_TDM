@@ -31,11 +31,12 @@ uv python install 3.12
 source swincross_env/bin/activate
 [ -f requirements.txt ] && uv pip install -r requirements.txt || { echo "requirements.txt missing"; exit 1; }
 
+EPOCH_NUMBER=1000
+
 # ── STEP 1 — Paths ────────────────────────────────────────────────────────────
 PPDATA_FOLDER=/data/ethan/PP_hecktor_swincross_npz
 JSON_LIST=dataset_swincross.json
 MODEL_DIR=HECKTOR_run_${EPOCH_NUMBER}_epoch
-EPOCH_NUMBER=1000
 
 mkdir -p /data/ethan/SwinCross
 ln -sfn /data/ethan/SwinCross ./runs
