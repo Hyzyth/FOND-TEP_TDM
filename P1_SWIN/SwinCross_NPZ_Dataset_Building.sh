@@ -4,17 +4,8 @@ set -e
 # =============================================================================
 # SwinCross Dataset Building — NPZ offline preprocessing
 # =============================================================================
-# Replaces dataset_builder_simpleITK.py / dataset_builder_TEMPORAL.py.
-# For each patient the script:
-#   1. Orients to RAS
-#   2. Resamples to 1 mm isotropic
-#   3. Crops foreground
-#   4. Saves a per-patient NPZ (image arrays + inverse-transform metadata)
-#   5. Saves the original-space GT NIfTI for evaluate_predictions.py
-#   6. Writes a MONAI-compatible JSON split
-#
-# Moving these heavy ops offline drops per-epoch data-loading time from
-# ~70 min to a few minutes (GPU util goes from ~0 % to near 100 %).
+# A) HECKTOR 2026      — k-fold split (X% train, (1-X)% fixed val)
+# B) TemPoRAL          — zero-shot validation dataset
 # =============================================================================
 
 # ── Environment ──────────────────────────────────────────────────────────────
@@ -50,19 +41,49 @@ fi
 #     --seed       42 \
 #     2>&1 | tee /data/ethan/PP_hecktor_swincross_npz/preprocessing.log
 
-# ── TemPoRAL zero-shot ────────────────────────────────────────────────────────
+# =============================================================================
+# HECKTOR 2026 — stratified k-fold split
+#
+#  --train_ratio X   X% of each hospital's patients → training pool.
+#                    Default 0.8 (80/20). Lower to 0.7 for more validation coverage.
+#  --k_folds         Number of CV folds. Default 5.
+#
+#  Outputs:
+#    dataset_swincross_2026kfold_fold{0..k-1}.json
+#    dataset_swincross_2026kfold_full.json
+#    split_info.json
+# =============================================================================
 echo ""
-echo "╔══════════════════════════════════════╗"
-echo "║  TemPoRAL → SwinCross NPZ build      ║"
-echo "╚══════════════════════════════════════╝"
-python3.12 npz_version/prepare_temporal_npz_swincross.py \
-    --input_folder  /data/santiago/Database_nifti_TEMPORAL \
-    --output_folder /data/ethan/PP_temporal_swincross_npz \
-    --json_name     dataset_swincross_temporal.json \
-    --timepoints    all \
-    2>&1 | tee /data/ethan/PP_temporal_swincross_npz/preprocessing.log
+echo "╔═════════════════════════════════════════════════╗"
+echo "║  HECKTOR 2026 → SwinCross k-fold NPZ build      ║"
+echo "╚═════════════════════════════════════════════════╝"
+
+OUTPUT_DIR=/data/ethan/PP_hecktor2026_kfold_npz
+mkdir -p $OUTPUT_DIR
+
+python3.12 npz_version/prepare_hecktor2026_kfold_npz.py \
+    --data_dir    "/data/santiago/HECKTOR_data/2026/HECKTOR 2026 Training Data" \
+    --output_dir  $OUTPUT_DIR \
+    --train_ratio 0.8 \
+    --k_folds     5 \
+    --json_prefix dataset_swincross_2026kfold \
+    --seed        42 \
+    2>&1 | tee $OUTPUT_DIR/preprocessing.log
+
+# ── TemPoRAL zero-shot ────────────────────────────────────────────────────────
+# echo ""
+# echo "╔══════════════════════════════════════╗"
+# echo "║  TemPoRAL → SwinCross NPZ build      ║"
+# echo "╚══════════════════════════════════════╝"
+# python3.12 npz_version/prepare_temporal_npz_swincross.py \
+#     --input_folder  /data/santiago/Database_nifti_TEMPORAL \
+#     --output_folder /data/ethan/PP_temporal_swincross_npz \
+#     --json_name     dataset_swincross_temporal.json \
+#     --timepoints    all \
+#     2>&1 | tee /data/ethan/PP_temporal_swincross_npz/preprocessing.log
 
 echo ""
 echo "Dataset building complete."
 echo "  HECKTOR NPZ → /data/ethan/PP_hecktor_swincross_npz/"
+echo "  HECKTOR K-Fold NPZ → /data/ethan/PP_hecktor2026_kfold_npz/"
 echo "  TemPoRAL NPZ → /data/ethan/PP_temporal_swincross_npz/"
