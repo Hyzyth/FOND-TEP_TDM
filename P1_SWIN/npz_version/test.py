@@ -83,7 +83,7 @@ def _remove_small_objects_physical(pred_np: np.ndarray,
 # ── Inverse transform: NPZ crop-space → original CT space ────────────────────
 
 def inverse_transform_to_original_space(pred_crop: np.ndarray,
-                                         npz_data) -> sitk.Image:
+                                         npz_data, ras_spacing) -> sitk.Image:
     """
     Undo the offline preprocessing to bring the prediction back into the
     original CT physical space, ready for evaluate_predictions.py.
@@ -99,7 +99,7 @@ def inverse_transform_to_original_space(pred_crop: np.ndarray,
     SimpleITK expects arrays in (z, y, x) = (S, A, R) order.
     The stored ras_size_itk is in ITK (x, y, z) = (R, A, S) convention.
     """
-    # 1. Uncrop into the full RAS 1mm volume
+    # 1. Uncrop into the full RAS volume
     ras_size  = [int(x) for x in npz_data["ras_size_itk"]]   # (nx, ny, nz) = (R, A, S)
     full_pred = np.zeros((ras_size[0], ras_size[1], ras_size[2]), dtype=np.uint8)
     cs, ce    = npz_data["crop_start"], npz_data["crop_end"]
@@ -108,34 +108,18 @@ def inverse_transform_to_original_space(pred_crop: np.ndarray,
     # 2. Convert to ITK array order (S, A, R) and build SimpleITK image
     pred_itk_arr = full_pred.transpose(2, 1, 0).astype(np.uint8)   # (nz, ny, nx)
     pred_sitk    = sitk.GetImageFromArray(pred_itk_arr)
-    pred_sitk.SetSpacing((1.0, 1.0, 1.0))
 
-    # Negate X and Y coordinates for the origin
-    ras_origin = [float(x) for x in npz_data["ras_origin"]]
-    lps_origin = [-ras_origin[0], -ras_origin[1], ras_origin[2]]
-    pred_sitk.SetOrigin(lps_origin)
+    pred_sitk.SetSpacing(ras_spacing)
 
-    # Negate the first two axes (X, Y) in the direction matrix
-    ras_dir = np.array(npz_data["ras_direction"]).flatten().reshape(3, 3)
-    lps_dir = ras_dir.copy()
-    lps_dir[0, :] = -lps_dir[0, :]  # Flip X
-    lps_dir[1, :] = -lps_dir[1, :]  # Flip Y
-    pred_sitk.SetDirection(lps_dir.flatten().tolist())
+    pred_sitk.SetOrigin([float(x) for x in npz_data["ras_origin"]])
+    pred_sitk.SetDirection([float(x) for x in npz_data["ras_direction"].flatten()])
 
     # 3. Resample to the original CT space
     orig_size = [int(x) for x in npz_data["orig_size_itk"]]
     r = sitk.ResampleImageFilter()
-    r.SetOutputSpacing ([float(x) for x in npz_data["orig_spacing"]])
-
-    orig_origin_ras = [float(x) for x in npz_data["orig_origin"]]
-    orig_origin_lps = [-orig_origin_ras[0], -orig_origin_ras[1], orig_origin_ras[2]]
-    r.SetOutputOrigin(orig_origin_lps)
-    
-    orig_dir_ras = np.array(npz_data["orig_direction"]).flatten().reshape(3, 3)
-    orig_dir_lps = orig_dir_ras.copy()
-    orig_dir_lps[0, :] = -orig_dir_lps[0, :]  # Flip X
-    orig_dir_lps[1, :] = -orig_dir_lps[1, :]  # Flip Y
-    r.SetOutputDirection(orig_dir_lps.flatten().tolist())
+    r.SetOutputSpacing([float(x) for x in npz_data["orig_spacing"]])
+    r.SetOutputOrigin([float(x) for x in npz_data["orig_origin"]])
+    r.SetOutputDirection([float(x) for x in npz_data["orig_direction"].flatten()])
 
     r.SetSize          (orig_size)
     r.SetInterpolator  (sitk.sitkNearestNeighbor)
@@ -277,14 +261,22 @@ def main():
 
         del val_inputs, val_outputs
 
+        # --- CALCULATE TRUE NATIVE RAS SPACING ---
+        # Simulate orienting the original metadata to RAS to get the exact spacing 
+        # the array had during the network inference.
+        dummy = sitk.Image(1, 1, 1, sitk.sitkUInt8)
+        dummy.SetSpacing([float(x) for x in npz_data["orig_spacing"]])
+        dummy.SetDirection([float(x) for x in npz_data["orig_direction"].flatten()])
+        ras_spacing = sitk.DICOMOrient(dummy, "RAS").GetSpacing()
+
         # ── Post-processing ───────────────────────────────────────────────
         # Spacing used for physical-threshold small-object removal is 1mm
         # isotropic because the prediction lives in the pre-processed space.
         pred_np = _remove_border_objects(pred_np)
-        pred_np = _remove_small_objects_physical(pred_np, spacing_mm=(1.0, 1.0, 1.0))
+        pred_np = _remove_small_objects_physical(pred_np, spacing_mm=ras_spacing)
 
         # ── Inverse transform → original CT space ─────────────────────────
-        prediction_sitk = inverse_transform_to_original_space(pred_np, npz_data)
+        prediction_sitk = inverse_transform_to_original_space(pred_np, npz_data, ras_spacing)
 
         sitk.WriteImage(prediction_sitk, output_path)
         print(f"  ✅ Saved: {output_path}")
