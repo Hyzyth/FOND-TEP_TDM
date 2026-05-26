@@ -109,16 +109,35 @@ def inverse_transform_to_original_space(pred_crop: np.ndarray,
     pred_itk_arr = full_pred.transpose(2, 1, 0).astype(np.uint8)   # (nz, ny, nx)
     pred_sitk    = sitk.GetImageFromArray(pred_itk_arr)
     pred_sitk.SetSpacing((1.0, 1.0, 1.0))
-    pred_sitk.SetOrigin   ([float(x) for x in npz_data["ras_origin"]])
-    pred_sitk.SetDirection([float(x) for x in npz_data["ras_direction"]])
+
+    # Negate X and Y coordinates for the origin
+    ras_origin = [float(x) for x in npz_data["ras_origin"]]
+    lps_origin = [-ras_origin[0], -ras_origin[1], ras_origin[2]]
+    pred_sitk.SetOrigin(lps_origin)
+
+    # Negate the first two axes (X, Y) in the direction matrix
+    ras_dir = np.array(npz_data["ras_direction"]).flatten().reshape(3, 3)
+    lps_dir = ras_dir.copy()
+    lps_dir[0, :] = -lps_dir[0, :]  # Flip X
+    lps_dir[1, :] = -lps_dir[1, :]  # Flip Y
+    pred_sitk.SetDirection(lps_dir.flatten().tolist())
 
     # 3. Resample to the original CT space
     orig_size = [int(x) for x in npz_data["orig_size_itk"]]
     r = sitk.ResampleImageFilter()
     r.SetOutputSpacing ([float(x) for x in npz_data["orig_spacing"]])
+
+    orig_origin_ras = [float(x) for x in npz_data["orig_origin"]]
+    orig_origin_lps = [-orig_origin_ras[0], -orig_origin_ras[1], orig_origin_ras[2]]
+    r.SetOutputOrigin(orig_origin_lps)
+    
+    orig_dir_ras = np.array(npz_data["orig_direction"]).flatten().reshape(3, 3)
+    orig_dir_lps = orig_dir_ras.copy()
+    orig_dir_lps[0, :] = -orig_dir_lps[0, :]  # Flip X
+    orig_dir_lps[1, :] = -orig_dir_lps[1, :]  # Flip Y
+    r.SetOutputDirection(orig_dir_lps.flatten().tolist())
+
     r.SetSize          (orig_size)
-    r.SetOutputOrigin  ([float(x) for x in npz_data["orig_origin"]])
-    r.SetOutputDirection([float(x) for x in npz_data["orig_direction"]])
     r.SetInterpolator  (sitk.sitkNearestNeighbor)
     r.SetTransform     (sitk.Transform())
     r.SetDefaultPixelValue(0)
