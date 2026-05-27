@@ -26,7 +26,8 @@ RUN_KFOLD_PRODUCTION_FULL=false  # Trains a final model on 100% of the train poo
 
 # ── 2. Hardware & Hyperparameters ──────────────────────────────────────────
 GPU=0
-EPOCH_NUMBER=400
+EPOCH_NUMBER_CLASSIC=1000
+EPOCH_NUMBER_KFOLD=400
 BATCH_SIZE=2
 CACHE_RATE=0.35  # Set to 0.0 if you lack RAM
 
@@ -34,8 +35,8 @@ CACHE_RATE=0.35  # Set to 0.0 if you lack RAM
 PPDATA_FOLDER="/data/ethan/PP_hecktor2026_kfold_npz"
 JSON_PREFIX="dataset_swincross_2026kfold"
 
-CLASSIC_MODEL_DIR="HECKTOR_run_${EPOCH_NUMBER}_epoch"
-KFOLD_BASE_DIR="HECKTOR_kfold_${EPOCH_NUMBER}ep"
+CLASSIC_MODEL_DIR="HECKTOR_run_${EPOCH_NUMBER_CLASSIC}_epoch"
+KFOLD_BASE_DIR="HECKTOR_kfold_${EPOCH_NUMBER_KFOLD}ep"
 K_FOLDS=5
 
 
@@ -63,7 +64,7 @@ ln -sfn /data/ethan/SwinCross ./runs
 # ── A. CLASSIC TRAINING ───────────────────────────────────────────────────
 if [ "$RUN_CLASSIC_TRAIN" = true ]; then
     echo "╔════════════════════════════════════════════════════════════╗"
-    echo "║  CLASSIC TRAINING (${EPOCH_NUMBER} Epochs)                            ║"
+    echo "║  CLASSIC TRAINING (${EPOCH_NUMBER_CLASSIC} Epochs)                            ║"
     echo "╚════════════════════════════════════════════════════════════╝"
     mkdir -p /data/ethan/SwinCross/$CLASSIC_MODEL_DIR
     
@@ -77,7 +78,7 @@ if [ "$RUN_CLASSIC_TRAIN" = true ]; then
         --val_every  20 \
         --workers    4 \
         --cache_rate $CACHE_RATE \
-        --max_epochs $EPOCH_NUMBER \
+        --max_epochs $EPOCH_NUMBER_CLASSIC \
         --warmup_epochs 50 \
         --RandFlipd_prob           0.5 \
         --RandRotate90d_prob       0.5 \
@@ -97,7 +98,7 @@ if [ "$RUN_CLASSIC_RESUME" = true ]; then
         --json_list       ${JSON_PREFIX}_classic.json \
         --logdir          $CLASSIC_MODEL_DIR \
         --checkpoint      ./runs/$CLASSIC_MODEL_DIR/model_last.pth \
-        --max_epochs      $EPOCH_NUMBER \
+        --max_epochs      $EPOCH_NUMBER_CLASSIC \
         --warmup_epochs   50 \
         --batch_size      $BATCH_SIZE \
         --val_every       20 \
@@ -110,7 +111,7 @@ fi
 # ── B. K-FOLD CROSS VALIDATION ────────────────────────────────────────────
 if [ "$RUN_KFOLD_TRAIN" = true ]; then
     echo "╔════════════════════════════════════════════════════════════╗"
-    echo "║  K-FOLD TRAINING (k=${K_FOLDS}, ${EPOCH_NUMBER} Epochs)                         ║"
+    echo "║  K-FOLD TRAINING (k=${K_FOLDS}, ${EPOCH_NUMBER_KFOLD} Epochs)                         ║"
     echo "╚════════════════════════════════════════════════════════════╝"
     
     # Sanity check JSONs
@@ -137,7 +138,7 @@ if [ "$RUN_KFOLD_TRAIN" = true ]; then
             --val_every     20 \
             --workers       4 \
             --cache_rate    $CACHE_RATE \
-            --max_epochs    $EPOCH_NUMBER \
+            --max_epochs    $EPOCH_NUMBER_KFOLD \
             --warmup_epochs 50 \
             --RandFlipd_prob           0.5 \
             --RandRotate90d_prob       0.5 \
@@ -169,7 +170,7 @@ if [ "$RUN_KFOLD_PRODUCTION_FULL" = true ]; then
         --val_every     20 \
         --workers       4 \
         --cache_rate    $CACHE_RATE \
-        --max_epochs    $EPOCH_NUMBER \
+        --max_epochs    $EPOCH_NUMBER_KFOLD \
         --warmup_epochs 50 \
         --RandFlipd_prob           0.5 \
         --RandRotate90d_prob       0.5 \
