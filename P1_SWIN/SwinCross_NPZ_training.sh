@@ -168,7 +168,7 @@ for fold in $(seq 0 $((K_FOLDS - 1))); do
         --batch_size    2 \
         --val_every     20 \
         --workers       4 \
-        --cache_rate    0.5 \
+        --cache_rate    0.35 \
         --max_epochs    $EPOCH_NUMBER \
         --warmup_epochs 50 \
         --RandFlipd_prob           0.5 \
@@ -223,7 +223,7 @@ echo "         --json_list  ${JSON_PREFIX}_full.json"
 #     --batch_size      2 \
 #     --val_every       20 \
 #     --workers         4 \
-#     --cache_rate      0.5 \
+#     --cache_rate      0.35 \
 #     --RandFlipd_prob           0.5 \
 #     --RandRotate90d_prob       0.5 \
 #     --RandScaleIntensityd_prob 0.2 \
@@ -248,7 +248,7 @@ echo "         --json_list  ${JSON_PREFIX}_full.json"
 #     --batch_size    2 \
 #     --val_every     20 \
 #     --workers       4 \
-#     --cache_rate    0.5 \
+#     --cache_rate    0.35 \
 #     --max_epochs    $EPOCH_NUMBER \
 #     --warmup_epochs 50 \
 #     --RandFlipd_prob           0.5 \
@@ -267,7 +267,7 @@ echo "         --json_list  ${JSON_PREFIX}_full.json"
 #     --json_list  ${JSON_PREFIX}_fold0.json \
 #     --logdir     kfold_debug \
 #     --batch_size 2 \
-#     --cache_rate 0.5 \
+#     --cache_rate 1 \
 #     --max_epochs 2 \
 #     --val_every  1 \
 #     --workers    4 \
