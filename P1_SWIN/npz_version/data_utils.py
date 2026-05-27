@@ -169,22 +169,21 @@ def get_loader(args):
     # Only fast augmentations remain here.
     train_transform = transforms.Compose([
         loader_npz,
-        # Guard: pad to at least ROI size so RandCropByPosNeg never fails
-        # on very small volumes.
         transforms.SpatialPadd(
             keys=["image", "label"],
             spatial_size=(args.roi_x, args.roi_y, args.roi_z),
             mode="constant",
         ),
-        transforms.RandCropByPosNegLabeld(
+        transforms.RandCropByLabelClassesd(
             keys=["image", "label"],
             label_key="label",
             spatial_size=(args.roi_x, args.roi_y, args.roi_z),
-            pos=1,
-            neg=1,
-            num_samples=2,
+            num_classes=3,      # 0 = Background, 1 = Tumor (GTVp), 2 = Nodule (GTVn)
+            ratios=[1, 1, 1],   # [Bg, Tumor, Nodule] -> Pick equal patches from each class (if available)
+            num_samples=3,      # Extract 3 patches per volume
             image_key="image",
             image_threshold=0,
+            warn=False,         # Don't warn if not enough tumor/nodule pixels to fill all patches
         ),
         transforms.RandFlipd(keys=["image", "label"],
                              prob=args.RandFlipd_prob, spatial_axis=0),
