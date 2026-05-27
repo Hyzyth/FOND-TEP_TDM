@@ -93,44 +93,43 @@ def process_and_save(data_root: Path, pid: str,
 
 # ── K-fold JSON writer ────────────────────────────────────────────────────────
 
-def write_kfold_jsons(train_entries: List[dict], val_entries: List[dict],
+def write_kfold_jsons(pool_entries: List[dict], test_entries: List[dict],
                       k: int, out_dir: Path, prefix: str, seed: int) -> List[str]:
     """
-    Stratified-split train_entries into k folds (by source acronym),
-    write k fold JSONs + 1 full JSON.
+    Stratified-split pool_entries into k pure folds (by source acronym).
+    Generates k fold JSONs, 1 classic Train/Val JSON, and 1 Locked Test JSON.
     """
     rng = random.Random(seed)
 
-    # Group training entries by acronym for stratified splitting
+    # Group POOL entries by acronym for stratified splitting
     by_acr: Dict[str, List[dict]] = defaultdict(list)
-    for e in train_entries:
+    for e in pool_entries:
         by_acr[e["acronym"]].append(e)
 
-    # Build k stratified folds
+    # Build k stratified folds from the POOL
     folds: List[List[dict]] = [[] for _ in range(k)]
     for acr, entries in by_acr.items():
         shuffled = list(entries)
         rng.shuffle(shuffled)
         for i, e in enumerate(shuffled):
             folds[i % k].append(e)
-
+    
     print(f"\n{'─'*56}")
-    print(f"K-Fold JSON generation  (k={k})")
-    print(f"  Training pool : {len(train_entries)} cases")
-    print(f"  Fixed val     : {len(val_entries)} cases")
+    print(f"Data Split Generation  (k={k})")
+    print(f"  Train/Val Pool : {len(pool_entries)} cases")
+    print(f"  Locked Test Vault : {len(test_entries)} cases")
     print(f"{'─'*56}")
 
     files = []
+
+    # 1. K-Fold JSONs (Pure: NO test data mixed in)
     for fi in range(k):
         val_fold  = folds[fi]
         train_set = [e for fj, fold in enumerate(folds) if fj != fi for e in fold]
-        val_set   = val_fold + val_entries
+        val_set   = val_fold  # Pure validation. The test vault is locked away.
 
         json_data = {
-            "description": (
-                f"HECKTOR 2026 — SwinCross {k}-fold CV, fold {fi} "
-                f"| pool={len(train_entries)} fixed_val={len(val_entries)}"
-            ),
+            "description": f"HECKTOR 2026 - k={k} CV Fold {fi}",
             "labels": {"0": "background", "1": "GTVp", "2": "GTVn"},
             "training":   train_set,
             "validation": val_set,
@@ -139,24 +138,67 @@ def write_kfold_jsons(train_entries: List[dict], val_entries: List[dict],
         with open(out_dir / fname, "w") as f:
             json.dump(json_data, f, indent=2)
         files.append(fname)
-        print(f"  fold {fi}: train={len(train_set):4d}  val={len(val_set):4d} "
-              f"(holdout={len(val_fold)}, fixed={len(val_entries)})")
+        print(f"  fold {fi}: train={len(train_set):4d}  val={len(val_set):4d}")
 
-    # Full-training JSON
-    full_json = {
-        "description": (
-            f"HECKTOR 2026 — SwinCross full training "
-            f"| pool={len(train_entries)} fixed_val={len(val_entries)}"
-        ),
+    # 2. Classic JSON (Uses fold 0's split as a standard Train/Val setup)
+    classic_json = {
+        "description": "HECKTOR 2026 - Classic Train/Val Split",
         "labels": {"0": "background", "1": "GTVp", "2": "GTVn"},
-        "training":   train_entries,
-        "validation": val_entries,
+        "training":   [e for fj, fold in enumerate(folds) if fj != 0 for e in fold],
+        "validation": folds[0],
+    }
+    classic_fname = f"{prefix}_classic.json"
+    with open(out_dir / classic_fname, "w") as f:
+        json.dump(classic_json, f, indent=2)
+    files.append(classic_fname)
+    print(f"  classic run: train={len(classic_json['training']):4d}  val={len(classic_json['validation']):4d}")
+
+    # 3. The Locked Test JSON (For inference ONLY)
+    test_json = {
+        "description": "HECKTOR 2026 - Locked Test Vault",
+        "labels": {"0": "background", "1": "GTVp", "2": "GTVn"},
+        "training":   [], # Empty, the model never trains on this
+        "validation": test_entries, # test.py uses the "validation" key to find files
+    }
+    test_fname = f"{prefix}_test.json"
+    with open(out_dir / test_fname, "w") as f:
+        json.dump(test_json, f, indent=2)
+    files.append(test_fname)
+    print(f"  test vault : {len(test_entries)} cases locked away for final inference")
+
+    # 4. Classic Train-Only JSON (For isolated overfit checking)
+    classic_train_json = {
+        "description": "HECKTOR 2026 - Classic Train Only",
+        "labels": {"0": "background", "1": "GTVp", "2": "GTVn"},
+        "validation": classic_json["training"] 
+    }
+    train_fname = f"{prefix}_classic_train.json"
+    with open(out_dir / train_fname, "w") as f:
+        json.dump(classic_train_json, f, indent=2)
+    files.append(train_fname)
+
+    # 5. Classic Val-Only JSON (For isolated overfit checking)
+    classic_val_json = {
+        "description": "HECKTOR 2026 - Classic Val Only",
+        "labels": {"0": "background", "1": "GTVp", "2": "GTVn"},
+        "validation": classic_json["validation"]
+    }
+    val_fname = f"{prefix}_classic_val.json"
+    with open(out_dir / val_fname, "w") as f:
+        json.dump(classic_val_json, f, indent=2)
+    files.append(val_fname)
+
+    # 6. Full Production JSON (100% of the Pool)
+    full_json = {
+        "description": "HECKTOR 2026 - 100% Train Pool Production Model",
+        "labels": {"0": "background", "1": "GTVp", "2": "GTVn"},
+        "training": pool_entries,     # Trains on 100% of the pool
+        "validation": pool_entries    # Validates on itself just to satisfy the training loop
     }
     full_fname = f"{prefix}_full.json"
     with open(out_dir / full_fname, "w") as f:
         json.dump(full_json, f, indent=2)
     files.append(full_fname)
-    print(f"  full:  train={len(train_entries):4d}  val={len(val_entries):4d}")
 
     return files
 
@@ -181,22 +223,22 @@ def main(args: argparse.Namespace) -> None:
 
     # ── Stratified split by acronym ───────────────────────────────────────
     train_pids: List[Tuple[str, str]] = []   # (acronym, pid)
-    val_pids:   List[Tuple[str, str]] = []
+    test_pids:   List[Tuple[str, str]] = []
 
     for acr, pids in sorted(acr_to_pids.items()):
         shuffled = list(pids)
         rng.shuffle(shuffled)
         n_train = max(1, round(len(shuffled) * args.train_ratio))
-        # Keep at least 1 case in val per acronym if possible
+        # Keep at least 1 case in test per acronym if possible
         if len(shuffled) > 1:
             n_train = min(n_train, len(shuffled) - 1)
         train_pids.extend((acr, p) for p in shuffled[:n_train])
-        val_pids.extend((acr, p)   for p in shuffled[n_train:])
+        test_pids.extend((acr, p)   for p in shuffled[n_train:])
 
-    print(f"\nSplit:  train={len(train_pids)}, val={len(val_pids)}")
+    print(f"\nSplit:  train={len(train_pids)}, test={len(test_pids)}")
 
     # ── Create output directories ─────────────────────────────────────────
-    for sub in ["npz/train", "npz/val", "labels/train", "labels/val"]:
+    for sub in ["npz/train", "npz/test", "labels/train", "labels/test"]:
         (out_root / sub).mkdir(parents=True, exist_ok=True)
 
     skipped: List[str] = []
@@ -216,21 +258,21 @@ def main(args: argparse.Namespace) -> None:
 
     # ── Preprocess validation cases ───────────────────────────────────────
     print(f"\nProcessing validation cases…")
-    val_entries: List[dict] = []
-    for acr, pid in tqdm(sorted(val_pids), desc="val"):
-        npz_rel  = f"npz/val/{pid}.npz"
-        lbl_rel  = f"labels/val/{pid}_gt.nii.gz"
+    test_entries: List[dict] = []
+    for acr, pid in tqdm(sorted(test_pids), desc="test"):
+        npz_rel  = f"npz/test/{pid}.npz"
+        lbl_rel  = f"labels/test/{pid}_gt.nii.gz"
         ok = process_and_save(data_root, pid, out_root / npz_rel, out_root / lbl_rel)
         if not ok:
             skipped.append(pid); continue
-        val_entries.append({"npz": npz_rel, "label": lbl_rel,
-                             "case_id": pid, "acronym": acr})
-    print(f"  → {len(val_entries)} processed")
+        test_entries.append({"npz": npz_rel, "label": lbl_rel,
+                              "case_id": pid, "acronym": acr})
+    print(f"  → {len(test_entries)} processed")
 
     # ── Build JSONs ───────────────────────────────────────────────────────
     fold_files = write_kfold_jsons(
-        train_entries=train_entries,
-        val_entries=val_entries,
+        pool_entries=train_entries,
+        test_entries=test_entries,
         k=args.k_folds,
         out_dir=out_root,
         prefix=args.json_prefix,
@@ -245,7 +287,7 @@ def main(args: argparse.Namespace) -> None:
         },
         "acronyms": sorted(acr_to_pids.keys()),
         "counts": {
-            "train": len(train_entries), "val": len(val_entries),
+            "train": len(train_entries), "test": len(test_entries),
             "skipped": len(skipped),
         },
         "fold_files": fold_files,
@@ -270,7 +312,7 @@ if __name__ == "__main__":
                     default="/data/ethan/PP_hecktor2026_kfold_npz")
     ap.add_argument("--train_ratio", type=float, default=0.8, metavar="X",
                     help="Fraction of each acronym's patients in the training pool. "
-                         "Default: 0.8  (80%% train, 20%% fixed val).")
+                         "Default: 0.8  (80%% train, 20%% fixed test).")
     ap.add_argument("--k_folds",    type=int,   default=5)
     ap.add_argument("--json_prefix", default="dataset_swincross_2026kfold")
     ap.add_argument("--seed",        type=int,  default=42)
