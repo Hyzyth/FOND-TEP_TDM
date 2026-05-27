@@ -118,7 +118,8 @@ def run_training(
                 val_labels_gpu = val_data["label"].to(device)
                 val_outputs_list = [post_pred(i) for i in decollate_batch(val_outputs_gpu)]
                 val_labels_list = [post_label(i) for i in decollate_batch(val_labels_gpu)]
-                init_val_loss += loss_func(val_outputs_gpu, val_labels_gpu).item()
+                # explicitly cast to float32 to prevent FP16 log(0) underflow in Focal Loss
+                init_val_loss += loss_func(val_outputs_gpu.float(), val_labels_gpu.float()).item()
                 acc_func(y_pred=val_outputs_list, y=val_labels_list)
                 del val_outputs_gpu, val_labels_gpu, val_outputs_list, val_labels_list
         init_mean_acc = acc_func.aggregate().item()
@@ -253,7 +254,8 @@ def run_training(
                         post_label(i) for i in decollate_batch(val_labels_gpu)
                     ]
 
-                    val_loss_batch = loss_func(val_outputs_gpu, val_labels_gpu)
+                    # explicitly cast to float32 to prevent FP16 log(0) underflow in Focal Loss
+                    val_loss_batch = loss_func(val_outputs_gpu.float(), val_labels_gpu.float())
                     val_loss += val_loss_batch.item()
 
                     acc_func(y_pred=val_outputs_list, y=val_labels_list)
