@@ -111,9 +111,7 @@ def run_training(
         with torch.no_grad():
             for val_data in val_loader:
                 init_val_steps += 1
-                with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=torch.cuda.is_available()):
-                    # The output of model_inferer is already on the GPU
-                    val_outputs_gpu = model_inferer(val_data["image"].to(device))
+                val_outputs_gpu = model_inferer(val_data["image"].to(device))
                 # Use .to(device) or .cuda() to move labels
                 val_labels_gpu = val_data["label"].to(device)
                 val_outputs_list = [post_pred(i) for i in decollate_batch(val_outputs_gpu)]
@@ -243,17 +241,7 @@ def run_training(
                 for val_data in val_loader:
                     val_steps += 1
 
-                    # ── FP16 inference — always ON, separate from training AMP ──
-                    # --noamp disables AMP only during backward; inference is
-                    # always safe in FP16 and roughly 2× faster than FP32.
-                    with torch.autocast(
-                        device_type="cuda",
-                        dtype=torch.float16,
-                        enabled=torch.cuda.is_available(),
-                    ):
-                        val_outputs_gpu = model_inferer(
-                            val_data["image"].to(device)
-                        )
+                    val_outputs_gpu = model_inferer(val_data["image"].to(device))
 
                     val_labels_gpu = val_data["label"].to(device)
 

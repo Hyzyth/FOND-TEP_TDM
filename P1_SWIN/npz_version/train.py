@@ -67,7 +67,7 @@ class FocalTverskyLoss(nn.Module):
         loss = self.tversky(y_pred, y_true)
 
         # Focal modulation
-        loss = loss ** self.gamma
+        loss = torch.clamp(loss, min=1e-7) ** self.gamma
 
         return loss.mean()
 
@@ -132,8 +132,7 @@ parser.add_argument("--beta",              default=0.7,  type=float) # FN Penalt
 parser.add_argument("--cache_rate",        default=1.0,  type=float,
                     help="Fraction of training data to cache in RAM. "
                          "0.0 = no cache (always fast with NPZ).")
-
-
+        
 def main():
     args = parser.parse_args()
     args.amp    = not args.noamp
@@ -218,11 +217,15 @@ def main_worker(gpu, args):
         get_not_nans=False,
     )
 
+    def amp_predictor(x):
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=torch.cuda.is_available()):
+            return model(x)
+    
     model_inferer = partial(
         sliding_window_inference,
         roi_size=inf_size,
         sw_batch_size=args.sw_batch_size,
-        predictor=model,
+        predictor=amp_predictor,
         overlap=args.infer_overlap,
     )
 

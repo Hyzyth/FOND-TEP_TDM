@@ -12,16 +12,24 @@
 import os
 import torch
 import numpy as np
+from pathlib import Path
+import sys
 import SimpleITK as sitk
 from scipy import ndimage
 from monai.inferers.utils import sliding_window_inference # modification : changed import path as per VSCode suggestion monai.inferers -> monai.inferers.utils
 import nibabel as nib
-from data_utils import get_loader # Modification: Change the reference to the .py in the root with the code changes. Original version stays in utils folder
-from trainer import dice
 import argparse
+import warnings
+
+# Safeguard
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
+
+from nii_version.data_utils import get_loader # Modification: Change the reference to the .py in the root with the code changes. Original version stays in utils folder
+from nii_version.trainer import dice
+
 from networks.SwinTransModels import CONFIGS as CONFIGS_sw_seg
 from networks.SwinTransModels import *
-import warnings
 
 # Recursion limit was set for deprecated connected components counting functions
 #import sys

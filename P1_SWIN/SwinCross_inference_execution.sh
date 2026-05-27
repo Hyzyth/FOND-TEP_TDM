@@ -87,7 +87,7 @@ run_echo_plotting(){
 # HECKTOR_OUT=/data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/inference_testset
 # mkdir -p $HECKTOR_OUT
 # run_echo_infer_hecktor
-# CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
+# CUDA_VISIBLE_DEVICES=0 python3.12 nii_version/test.py \
 #     --pretrained_dir        ./runs/$MODEL_DIR \
 #     --pretrained_model_name $MODEL_USED \
 #     --output_dir            $HECKTOR_OUT \
@@ -98,7 +98,7 @@ run_echo_plotting(){
 #     2>&1 | tee $HECKTOR_OUT/inference_testset.log
 
 # run_echo_val_hecktor
-# CUDA_VISIBLE_DEVICES=0 python3.12 evaluate_predictions.py \
+# CUDA_VISIBLE_DEVICES=0 python3.12 nii_version/evaluate_predictions.py \
 #     --data_dir $HECKTOR_DATA \
 #     --json_list dataset_swincross_testing_group.json \
 #     --output_dir $HECKTOR_OUT \
@@ -116,7 +116,7 @@ HECKTOR_OUT=/data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/hecktor_best_model_ove
 mkdir -p $HECKTOR_OUT
 
 run_echo_infer_hecktor
-CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
+CUDA_VISIBLE_DEVICES=0 python3.12 nii_version/test.py \
     --pretrained_dir ./runs/$MODEL_DIR \
     --pretrained_model_name $MODEL_USED \
     --output_dir $HECKTOR_OUT \
@@ -127,7 +127,7 @@ CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
     2>&1 | tee $HECKTOR_OUT/inference.log
 
 run_echo_val_hecktor
-CUDA_VISIBLE_DEVICES=0 python3.12 evaluate_predictions.py \
+CUDA_VISIBLE_DEVICES=0 python3.12 nii_version/evaluate_predictions.py \
     --data_dir $HECKTOR_DATA \
     --json_list dataset_swincross.json \
     --output_dir $HECKTOR_OUT \
@@ -145,7 +145,7 @@ TEMPORAL_OUT=/data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/temporal_zeroshot
 mkdir -p $TEMPORAL_OUT
 
 run_echo_infer_temporal
-CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
+CUDA_VISIBLE_DEVICES=0 python3.12 nii_version/test.py \
     --pretrained_dir ./runs/$MODEL_DIR \
     --pretrained_model_name $MODEL_USED \
     --output_dir $TEMPORAL_OUT \
@@ -156,7 +156,7 @@ CUDA_VISIBLE_DEVICES=0 python3.12 test.py \
     2>&1 | tee $TEMPORAL_OUT/inference.log
 
 run_echo_val_temporal
-CUDA_VISIBLE_DEVICES=0 python3.12 evaluate_predictions.py \
+CUDA_VISIBLE_DEVICES=0 python3.12 nii_version/evaluate_predictions.py \
     --data_dir $TEMPORAL_DATA \
     --json_list dataset_swincross_temporal.json \
     --output_dir $TEMPORAL_OUT \

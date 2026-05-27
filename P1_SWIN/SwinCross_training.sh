@@ -80,7 +80,7 @@ echo "GPU       : 0 (CUDA_VISIBLE_DEVICES=0)"
 
 # CUDA_VISIBLE_DEVICES=0 \
 # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-# python3.12 -u train.py \
+# python3.12 -u nii_version/train.py \
 #     --data_dir   $PPDATA_FOLDER \
 #     --logdir     $MODEL_DIR \
 #     --json_list  $JSON_LIST \
@@ -102,7 +102,7 @@ echo "GPU       : 0 (CUDA_VISIBLE_DEVICES=0)"
 
 CUDA_VISIBLE_DEVICES=0 \
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-python3.12 -u train.py \
+python3.12 -u nii_version/train.py \
     --data_dir        $PPDATA_FOLDER \
     --json_list       $JSON_LIST \
     --logdir          $MODEL_DIR \
@@ -130,7 +130,7 @@ python3.12 -u train.py \
 # Use this to verify the full pipeline runs end-to-end before committing to
 # a 2000-epoch job. Outputs go to ./runs/ethan_debug/ (i.e. /data/ethan/SwinCross/hecktor_runs/ethan_debug/)
 #
-# CUDA_VISIBLE_DEVICES=0 python3.12 train.py \
+# CUDA_VISIBLE_DEVICES=0 python3.12 nii_version/train.py \
 #     --data_dir   $PPDATA_FOLDER \
 #     --json_list  $JSON_LIST \
 #     --logdir     ethan_debug \
@@ -140,16 +140,3 @@ python3.12 -u train.py \
 #     --val_every  1 \
 #     --workers    0 \
 #     --noamp
-
-# =============================================================================
-# STEP 3 — Export training curves  [UNCOMMENT AFTER TRAINING]
-# =============================================================================
-# uv run export_graphs.py \
-#     --logdir  ./runs/$MODEL_DIR \
-#     --output  /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/training_graphics
-
-# Continuous version (use if training was interrupted and resumed one or more times):
-# uv run export_graphs.py \
-#     --logdir     ./runs/$MODEL_DIR \
-#     --output     /data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/training_graphics_continuous \
-#     --continuous

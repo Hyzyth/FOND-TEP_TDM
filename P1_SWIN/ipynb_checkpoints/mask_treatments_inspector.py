@@ -2,13 +2,18 @@ import SimpleITK as sitk
 import numpy as np
 import torch
 import os
+from pathlib import Path
+import sys
 import copy
 from monai import transforms
 from monai.transforms import Invertd
 from scipy.ndimage import center_of_mass
 
+# Safeguard
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
 # Import de tes anciennes fonctions de bricolage
-from test import create_prediction_sitk_with_metadata
+from nii_version.test import create_prediction_sitk_with_metadata
 from test_v2 import create_prediction_sitk_from_monai_debug
 from test_old import create_prediction_sitk_with_metadata as create_prediction_sitk_with_metadata_old
 
