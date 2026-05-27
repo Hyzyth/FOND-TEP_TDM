@@ -23,7 +23,7 @@ from torch.distributions.normal import Normal
 import torch.nn.functional as nnf
 import numpy as np
 
-import configs_sw as configs
+from . import configs_sw as configs
 
 
 class Mlp(nn.Module):
