@@ -1,36 +1,60 @@
 #!/bin/bash
 # =============================================================================
 # SwinCross Inference & Rich Evaluation Master Script
+# Author : Ethan
 # Project : ProjetMaster / StageM1_IA
 # Updated : 2026-05 (NPZ pipeline)
 #
-# Data source  : /data/ethan/PP_hecktor_swincross_npz/    (HECKTOR NPZ)
-#                /data/ethan/PP_temporal_swincross_npz/   (TemPoRAL NPZ)
-# Model weights: /data/ethan/SwinCross/<MODEL_DIR>/
-# Predictions  : /data/ethan/SwinCross/<INFERENCE_OUTPUT>/
+# Data source  : /data/ethan/PP_hecktor2026_kfold_npz/  (HECKTOR NPZ)
+#                /data/ethan/PP_temporal_swincross_npz/ (TemPoRAL NPZ)
 #
-# Two inference modes:
-#
-#   MODE A — Single model (original)
-#     From a single training run (Mode A training).
-#
-#   MODE B — K-fold: per-fold inference + ensemble
-#     Runs test.py for each fold model, then calls ensemble_kfold_predictions.py
-#     for majority-vote fusion across k models.
-#     Evaluation is run on both individual folds and the ensemble.
-#
-# Speed improvements vs. original
-# --------------------------------
-#  - test.py loads NPZ directly (no MONAI Invertd overhead).
-#  - FP16 autocast always active during inference.
-#  - Optional --compile flag wraps model with torch.compile.
-#  - Default infer_overlap lowered to 0.5 (was 0.7) for ~3× faster inference;
-#    set back to 0.7 for best quality.
+# Modes: Classic Single Model & K-Fold Ensemble
+# Targets: Test Vault, Train Pool, Val Pool, TemPoRAL Zero-Shot
 # =============================================================================
 
 set -e
 
-# ── STEP 0 — Environment ──────────────────────────────────────────────────────
+# ╔════════════════════════════════════════════════════════════════════════╗
+# ║                          GLOBAL CONFIGURATION                          ║
+# ╚════════════════════════════════════════════════════════════════════════╝
+# ── 1. Execution Toggles (Set to true to skip, false to run) ───────────────
+SKIP_CLASSIC_TEST=false
+SKIP_CLASSIC_TRAIN=false
+SKIP_CLASSIC_VAL=false
+
+SKIP_KFOLD_TEST=false
+SKIP_KFOLD_TRAIN=false
+SKIP_KFOLD_VAL=false
+
+SKIP_TEMPORAL_CLASSIC=false
+SKIP_TEMPORAL_KFOLD=false
+
+# ── 2. Hardware & Parameters ───────────────────────────────────────────────
+GPU=0
+INFER_OVERLAP=0.5   # 0.5 for speed, 0.7 for max quality
+SW_BATCH=4
+
+# ── 3. Data Paths & JSONs ──────────────────────────────────────────────────
+HECKTOR_DATA="/data/ethan/PP_hecktor2026_kfold_npz"
+TEMPORAL_DATA="/data/ethan/PP_temporal_swincross_npz"
+
+JSON_TEST="dataset_swincross_2026kfold_test.json"
+JSON_TRAIN="dataset_swincross_2026kfold_classic_train.json"
+JSON_VAL="dataset_swincross_2026kfold_classic_val.json"
+JSON_TEMPORAL="dataset_swincross_temporal.json"
+
+# ── 4. Model Setup ─────────────────────────────────────────────────────────
+# Classic Mode 
+CLASSIC_MODEL_DIR="HECKTOR_run_1000_epoch"
+CLASSIC_WEIGHTS="model_best.pth"
+
+# K-Fold Mode
+KFOLD_BASE_DIR="HECKTOR_kfold_400ep"
+K_FOLDS=5
+
+# ╔════════════════════════════════════════════════════════════════════════╗
+# ║                     ENVIRONMENT & HELPER FUNCTIONS                     ║
+# ╚════════════════════════════════════════════════════════════════════════╝
 if [ ! -d "swincross_env" ]; then
     echo "swincross_env not found — run the training script first."
     exit 1
@@ -38,279 +62,183 @@ fi
 source swincross_env/bin/activate
 [ -f requirements.txt ] && uv pip install -r requirements.txt matplotlib seaborn pandas
 
-# ── STEP 1 — Paths ────────────────────────────────────────────────────────────
-MODEL_DIR=HECKTOR_run_1000_epoch
-MODEL_USED=model_last.pth
-GPU=0
-
-HECKTOR_DATA=/data/ethan/PP_hecktor_swincross_npz
-TEMPORAL_DATA=/data/ethan/PP_temporal_swincross_npz
-
 mkdir -p /data/ethan/SwinCross
 ln -sfn /data/ethan/SwinCross ./runs
 
-# ── Banner helpers ────────────────────────────────────────────────────────────
-banner_infer_heck()    { 
-    echo "╔═══════════════════════════════╗"; 
-    echo "║  SwinCross HECKTOR Inference  ║"; 
-    echo "╚═══════════════════════════════╝"; 
-    }
-banner_infer_temporal(){ 
-    echo "╔══════════════════════════════════════════╗"; 
-    echo "║  SwinCross TemPoRAL Zero-Shot Inference  ║"; 
-    echo "╚══════════════════════════════════════════╝"; 
-    }
-banner_eval_heck()     { 
-    echo "╔════════════════════════════════╗"; 
-    echo "║  SwinCross HECKTOR Evaluation  ║"; 
-    echo "╚════════════════════════════════╝"; 
-    }
-banner_eval_temporal() { 
-    echo "╔═════════════════════════════════╗"; 
-    echo "║  SwinCross TemPoRAL Evaluation  ║"; 
-    echo "╚═════════════════════════════════╝"; 
-    }
-banner_plot()          { 
-    echo "╔════════════════════╗"; 
-    echo "║  Metrics Plotting  ║"; 
-    echo "╚════════════════════╝"; 
-    }
 
-# =============================================================================
-# 1. Single-model inference: HECKTOR Inference, Evaluation & Plotting
-# =============================================================================
-HECKTOR_OUT=/data/ethan/SwinCross/$MODEL_DIR/hecktor_last_model_overlap05
-mkdir -p $HECKTOR_OUT
+# ── Helper: Run Single Model Inference + Eval + Plot ───────────────────────
+run_single_inference() {
+    local TARGET_NAME=$1
+    local DATA_DIR=$2
+    local JSON_FILE=$3
+    
+    echo "╔════════════════════════════════════════════════════════════╗"
+    echo "║ CLASSIC MODE : $TARGET_NAME"
+    echo "╚════════════════════════════════════════════════════════════╝"
+    
+    local OUT_DIR="/data/ethan/SwinCross/${CLASSIC_MODEL_DIR}/${TARGET_NAME}"
+    mkdir -p "$OUT_DIR"
 
-banner_infer_heck
-CUDA_VISIBLE_DEVICES=$GPU python3.12 npz_version/test.py \
-    --pretrained_dir        ./runs/$MODEL_DIR \
-    --pretrained_model_name $MODEL_USED \
-    --output_dir            $HECKTOR_OUT \
-    --data_dir              $HECKTOR_DATA \
-    --json_list             dataset_swincross_validation.json \
-    --infer_overlap 0.5 --in_channels 2 --out_channels 3 \
-    --roi_x 96 --roi_y 96 --roi_z 96 \
-    --workers 2 --sw_batch_size 4 --skip_existing \
-    2>&1 | tee $HECKTOR_OUT/inference.log
+    echo " [1/3] Running Inference with model: $CLASSIC_MODEL_DIR/$CLASSIC_WEIGHTS."
+    CUDA_VISIBLE_DEVICES=$GPU python3.12 npz_version/test.py \
+        --pretrained_dir "./runs/$CLASSIC_MODEL_DIR" \
+        --pretrained_model_name "$CLASSIC_WEIGHTS" \
+        --output_dir "$OUT_DIR" \
+        --data_dir "$DATA_DIR" \
+        --json_list "$JSON_FILE" \
+        --infer_overlap $INFER_OVERLAP --in_channels 2 --out_channels 3 \
+        --roi_x 96 --roi_y 96 --roi_z 96 \
+        --workers 2 --sw_batch_size $SW_BATCH --skip_existing \
+        2>&1 | tee "$OUT_DIR/inference.log"
 
-banner_eval_heck
-CUDA_VISIBLE_DEVICES=$GPU python3.12 npz_version/evaluate_predictions.py \
-    --data_dir $HECKTOR_DATA \
-    --json_list dataset_swincross_validation.json \
-    --output_dir $HECKTOR_OUT \
-    2>&1 | tee $HECKTOR_OUT/evaluation.log
+    echo " [2/3] Running Evaluation."
+    CUDA_VISIBLE_DEVICES=$GPU python3.12 npz_version/evaluate_predictions.py \
+        --data_dir "$DATA_DIR" \
+        --json_list "$JSON_FILE" \
+        --output_dir "$OUT_DIR" \
+        2>&1 | tee "$OUT_DIR/evaluation.log"
 
-banner_plot
-python3.12 plot_metrics.py \
-    --csv_path "$HECKTOR_OUT/per_case_evaluation_rich.csv" \
-    --output_dir "$HECKTOR_OUT/plots"
+    echo " [3/3] Generating Plots"
+    python3.12 plot_metrics.py \
+        --csv_path "$OUT_DIR/per_case_evaluation_rich.csv" \
+        --output_dir "$OUT_DIR/plots"
+    echo " Complete."
+}
 
-# ── Optional: high-overlap pass for best quality ──────────────────────────────
-# HECKTOR_OUT_07=/data/ethan/SwinCross/$MODEL_DIR/hecktor_best_model_overlap07
-# mkdir -p $HECKTOR_OUT_07
-# banner_infer_heck
-# CUDA_VISIBLE_DEVICES=$GPU python3.12 npz_version/test.py \
-#     --pretrained_dir ./runs/$MODEL_DIR \
-#     --pretrained_model_name $MODEL_USED \
-#     --output_dir $HECKTOR_OUT_07 \
-#     --data_dir $HECKTOR_DATA \
-#     --json_list dataset_swincross_validation.json \
-#     --infer_overlap 0.7 --in_channels 2 --out_channels 3 \
-#     --roi_x 96 --roi_y 96 --roi_z 96 \
-#     --workers 2 --sw_batch_size 4 --skip_existing \
-#     2>&1 | tee $HECKTOR_OUT_07/inference.log
+# ── Helper: Run K-Fold Ensemble Inference + Eval + Plot ────────────────────
+run_kfold_ensemble() {
+    local TARGET_NAME=$1
+    local DATA_DIR=$2
+    local JSON_FILE=$3
 
-# banner_eval_heck
-# CUDA_VISIBLE_DEVICES=$GPU python3.12 npz_version/evaluate_predictions.py \
-#     --data_dir $HECKTOR_DATA \
-#     --json_list dataset_swincross_validation.json \
-#     --output_dir $HECKTOR_OUT_07 \
-#     2>&1 | tee $HECKTOR_OUT_07/evaluation.log
+    echo "╔════════════════════════════════════════════════════════════╗"
+    echo "║ K-FOLD ENSEMBLE : $TARGET_NAME"
+    echo "╚════════════════════════════════════════════════════════════╝"
+    
+    local ENSEMBLE_OUT="/data/ethan/SwinCross/${KFOLD_BASE_DIR}_ensemble/${TARGET_NAME}"
+    mkdir -p "$ENSEMBLE_OUT"
+    local FOLD_DIRS=""
 
-# banner_plot
-# python3.12 plot_metrics.py \
-#     --csv_path "$HECKTOR_OUT_07/per_case_evaluation_rich.csv" \
-#     --output_dir "$HECKTOR_OUT_07/plots"
+    # 1. Generate predictions for each fold
+    echo " [1/4] Running Per-Fold Inference."
+    for fold in $(seq 0 $((K_FOLDS - 1))); do
+        local FOLD_MODEL_DIR="${KFOLD_BASE_DIR}_fold${fold}"
+        local FOLD_OUT="/data/ethan/SwinCross/${FOLD_MODEL_DIR}/${TARGET_NAME}"
+        mkdir -p "$FOLD_OUT"
+        FOLD_DIRS="$FOLD_DIRS $FOLD_OUT"
 
-# ── Optional: overfit check on training data ───────────────────────────────────
-HECKTOR_OUT_TRAIN=/data/ethan/SwinCross/$MODEL_DIR/hecktor_last_model_overfit_check
-mkdir -p $HECKTOR_OUT_TRAIN
-banner_infer_heck
-CUDA_VISIBLE_DEVICES=$GPU python3.12 npz_version/test.py \
-    --pretrained_dir ./runs/$MODEL_DIR \
-    --pretrained_model_name $MODEL_USED \
-    --output_dir $HECKTOR_OUT_TRAIN \
-    --data_dir $HECKTOR_DATA \
-    --json_list dataset_swincross_train.json \
-    --infer_overlap 0.5 --in_channels 2 --out_channels 3 \
-    --roi_x 96 --roi_y 96 --roi_z 96 \
-    --workers 2 --sw_batch_size 4 --skip_existing \
-    2>&1 | tee $HECKTOR_OUT_TRAIN/inference.log
+        echo "      ↳ Inferring Fold $fold."
+        CUDA_VISIBLE_DEVICES=$GPU python3.12 npz_version/test.py \
+            --pretrained_dir "./runs/$FOLD_MODEL_DIR" \
+            --pretrained_model_name "model_best.pth" \
+            --output_dir "$FOLD_OUT" \
+            --data_dir "$DATA_DIR" \
+            --json_list "$JSON_FILE" \
+            --infer_overlap $INFER_OVERLAP --in_channels 2 --out_channels 3 \
+            --roi_x 96 --roi_y 96 --roi_z 96 \
+            --workers 2 --sw_batch_size $SW_BATCH --skip_existing \
+            2>&1 | tee "$FOLD_OUT/inference.log"
+    done
 
-banner_eval_heck
-CUDA_VISIBLE_DEVICES=$GPU python3.12 npz_version/evaluate_predictions.py \
-    --data_dir $HECKTOR_DATA \
-    --json_list dataset_swincross_train.json \
-    --output_dir $HECKTOR_OUT_TRAIN \
-    2>&1 | tee $HECKTOR_OUT_TRAIN/evaluation.log
+    # 2. Ensemble majority vote
+    echo " [2/4] Running Majority-Vote Ensemble."
+    python3.12 npz_version/ensemble_kfold_predictions.py \
+        --fold_dirs $FOLD_DIRS \
+        --output_dir "$ENSEMBLE_OUT" \
+        --data_dir "$DATA_DIR" \
+        --json_list "$JSON_FILE" \
+        2>&1 | tee "$ENSEMBLE_OUT/ensemble.log"
 
-banner_plot
-python3.12 plot_metrics.py \
-    --csv_path "$HECKTOR_OUT_TRAIN/per_case_evaluation_rich.csv" \
-    --output_dir "$HECKTOR_OUT_TRAIN/plots"
+    # 3. Evaluate Ensemble
+    echo " [3/4] Evaluating Ensemble."
+    CUDA_VISIBLE_DEVICES=$GPU python3.12 npz_version/evaluate_predictions.py \
+        --data_dir "$DATA_DIR" \
+        --json_list "$JSON_FILE" \
+        --output_dir "$ENSEMBLE_OUT" \
+        2>&1 | tee "$ENSEMBLE_OUT/evaluation.log"
+    
+    # 4. Plot Ensemble Metrics
+    echo " [4/4] Generating Ensemble Plots."
+    python3.12 plot_metrics.py \
+        --csv_path "$ENSEMBLE_OUT/per_case_evaluation_rich.csv" \
+        --output_dir "$ENSEMBLE_OUT/plots"
+    echo " Complete."
+}
 
+# ── Helper: TemPoRAL Stratification & Plots ────────────────────────────────
+generate_temporal_sub_reports() {
+    local TARGET_DIR=$1
+    local RICH_CSV="$TARGET_DIR/per_case_evaluation_rich.csv"
 
-# =============================================================================
-# MODE B — K-fold inference + ensemble (2025+2026 data)
-# =============================================================================
-# K_FOLDS=5
-# EPOCH_NUMBER=1000
-# BASE_MODEL_DIR=HECKTOR_kfold_${EPOCH_NUMBER}ep
-# PPDATA_FOLDER=/data/ethan/PP_hecktor2026_kfold_npz
-# JSON_PREFIX=dataset_swincross_2026kfold
-# INFER_OVERLAP=0.5
-# GPU_INFER=0
-# GPU_EVAL=0
+    if [ -f "$RICH_CSV" ]; then
+        echo " [Extra] Generating Timepoint Sub-reports for TemPoRAL..."
+        local HEADER=$(head -1 "$RICH_CSV")
+        local TP_COL=$(head -1 "$RICH_CSV" | tr ',' '\n' | grep -n "^timepoint$" | cut -d: -f1)
 
-# echo "╔═══════════════════════════════════════════════════════╗"
-# echo "║  SwinCross K-Fold Inference + Evaluation + Ensemble   ║"
-# echo "╚═══════════════════════════════════════════════════════╝"
+        if [ -n "$TP_COL" ]; then
+            local UNIQUE_TPS=$(tail -n+2 "$RICH_CSV" | awk -F',' -v col="$TP_COL" '{print $col}' | sort -u | grep -v '^$')
+            
+            for tp in $UNIQUE_TPS; do
+                local SUB_CSV="$TARGET_DIR/per_case_rich_${tp}.csv"
+                {
+                    echo "$HEADER"
+                    grep -v "^case_id" "$RICH_CSV" | awk -F',' -v col="$TP_COL" -v tp="$tp" '$col == tp'
+                } > "$SUB_CSV"
+                
+                local N=$(tail -n+2 "$SUB_CSV" | wc -l)
+                echo "  ↳ $tp: $N cases → $SUB_CSV"
+                
+                # We pipe plotting output to /dev/null to avoid cluttering the terminal, 
+                # but you can remove the pipe if you want full verbosity.
+                python3.12 plot_metrics.py \
+                    --csv_path   "$SUB_CSV" \
+                    --output_dir "$TARGET_DIR/plots_${tp}" > /dev/null 2>&1
+            done
+            echo " Sub-reports Complete."
+        fi
+    fi
+    echo ""
+}
 
-# FOLD_INFER_DIRS=""   # populated below for ensemble step
+# ╔════════════════════════════════════════════════════════════════════════╗
+# ║                              EXECUTION                                 ║
+# ╚════════════════════════════════════════════════════════════════════════╝
+# ── 1. CLASSIC HECKTOR ────────────────────────────────────────────────────
+if [ "$SKIP_CLASSIC_TEST" = false ]; then
+    run_single_inference "hecktor_TEST_vault" $HECKTOR_DATA $JSON_TEST
+fi
 
-# # ── Per-fold inference + evaluation ──────────────────────────────────────────
-# for fold in $(seq 0 $((K_FOLDS - 1))); do
+if [ "$SKIP_CLASSIC_TRAIN" = false ]; then
+    run_single_inference "hecktor_overfit_TRAIN" $HECKTOR_DATA $JSON_TRAIN
+fi
 
-#     MODEL_DIR="${BASE_MODEL_DIR}_fold${fold}"
-#     JSON_LIST="${JSON_PREFIX}_fold${fold}.json"
-#     FOLD_OUT=/data/ethan/SwinCross/$MODEL_DIR/hecktor_inference_overlap${INFER_OVERLAP/./}
-#     mkdir -p $FOLD_OUT
+if [ "$SKIP_CLASSIC_VAL" = false ]; then
+    run_single_inference "hecktor_overfit_VAL" $HECKTOR_DATA $JSON_VAL
+fi
 
-#     FOLD_INFER_DIRS="$FOLD_INFER_DIRS $FOLD_OUT"
+# ── 2. K-FOLD ENSEMBLE HECKTOR ────────────────────────────────────────────
+if [ "$SKIP_KFOLD_TEST" = false ]; then
+    run_kfold_ensemble "hecktor_TEST_vault" $HECKTOR_DATA $JSON_TEST
+fi
 
-#     echo ""
-#     echo "┌─ Fold ${fold} inference ─────────────────────────────────"
-#     echo "│  Model : /data/ethan/SwinCross/$MODEL_DIR/model_best.pth"
-#     echo "│  JSON  : $JSON_LIST"
-#     echo "└──────────────────────────────────────────────────────"
+if [ "$SKIP_KFOLD_TRAIN" = false ]; then
+    # Checks if the ensemble overfits to the pool it trained on
+    run_kfold_ensemble "hecktor_overfit_TRAIN" $HECKTOR_DATA $JSON_TRAIN
+fi
 
-#     CUDA_VISIBLE_DEVICES=$GPU_INFER python3.12 npz_version/test.py \
-#         --pretrained_dir        ./runs/$MODEL_DIR \
-#         --pretrained_model_name model_best.pth \
-#         --output_dir            $FOLD_OUT \
-#         --data_dir              $PPDATA_FOLDER \
-#         --json_list             $JSON_LIST \
-#         --infer_overlap $INFER_OVERLAP \
-#         --in_channels 2 --out_channels 3 \
-#         --roi_x 96 --roi_y 96 --roi_z 96 \
-#         --workers 2 --sw_batch_size 4 --skip_existing \
-#         2>&1 | tee $FOLD_OUT/inference.log
+if [ "$SKIP_KFOLD_VAL" = false ]; then
+    run_kfold_ensemble "hecktor_overfit_VAL" $HECKTOR_DATA $JSON_VAL
+fi
 
-#     CUDA_VISIBLE_DEVICES=$GPU_EVAL python3.12 npz_version/evaluate_predictions.py \
-#         --data_dir  $PPDATA_FOLDER \
-#         --json_list $JSON_LIST \
-#         --output_dir $FOLD_OUT \
-#         2>&1 | tee $FOLD_OUT/evaluation.log
+# ── 3. TEMPORAL ZERO-SHOT ─────────────────────────────────────────────────
+if [ "$SKIP_TEMPORAL_CLASSIC" = false ]; then
+    run_single_inference "temporal_zeroshot" $TEMPORAL_DATA $JSON_TEMPORAL
+    generate_temporal_sub_reports "/data/ethan/SwinCross/${CLASSIC_MODEL_DIR}/temporal_zeroshot"
+fi
 
-#     python3.12 plot_metrics.py \
-#         --csv_path   "$FOLD_OUT/per_case_evaluation_rich.csv" \
-#         --output_dir "$FOLD_OUT/plots"
-
-# done
-
-# ── Ensemble: majority vote across all k fold models ─────────────────────────
-# echo ""
-# echo "╔═══════════════════════════════════╗"
-# echo "║  Majority-vote ensemble  (k=${K_FOLDS})  ║"
-# echo "╚═══════════════════════════════════╝"
-
-# ENSEMBLE_DIR=/data/ethan/SwinCross/${BASE_MODEL_DIR}_ensemble
-# mkdir -p $ENSEMBLE_DIR
-
-# python3.12 npz_version/ensemble_kfold_predictions.py \
-#     --fold_dirs  $FOLD_INFER_DIRS \
-#     --output_dir $ENSEMBLE_DIR \
-#     --data_dir   $PPDATA_FOLDER \
-#     --json_list  ${JSON_PREFIX}_full.json \
-#     2>&1 | tee $ENSEMBLE_DIR/ensemble.log
-
-# # Evaluate ensemble on fixed validation (full.json = all pool train + fixed val)
-# CUDA_VISIBLE_DEVICES=$GPU_EVAL python3.12 npz_version/evaluate_predictions.py \
-#     --data_dir  $PPDATA_FOLDER \
-#     --json_list ${JSON_PREFIX}_full.json \
-#     --output_dir $ENSEMBLE_DIR \
-#     2>&1 | tee $ENSEMBLE_DIR/evaluation.log
-
-# python3.12 plot_metrics.py \
-#     --csv_path   "$ENSEMBLE_DIR/per_case_evaluation_rich.csv" \
-#     --output_dir "$ENSEMBLE_DIR/plots"
-
-# echo ""
-# echo "  K-Fold Pipeline complete."
-# echo "  Per-fold predictions + metrics : /data/ethan/SwinCross/${BASE_MODEL_DIR}_fold*/hecktor_inference*/"
-# echo "  Ensemble predictions + metrics : $ENSEMBLE_DIR/"
-
-
-# =============================================================================
-# 2. TemPoRAL Zero-Shot Inference, Evaluation & Plotting (Works with any mode, 
-#     point to desired fold or ensemble directory)
-# =============================================================================
-# TEMPORAL_OUT=/data/ethan/SwinCross/hecktor_runs/$MODEL_DIR/temporal_zeroshot
-# mkdir -p $TEMPORAL_OUT
-
-# banner_infer_temporal
-# CUDA_VISIBLE_DEVICES=0 python3.12 npz_version/test.py \
-#     --pretrained_dir        ./runs/$MODEL_DIR \
-#     --pretrained_model_name $MODEL_USED \
-#     --output_dir            $TEMPORAL_OUT \
-#     --data_dir              $TEMPORAL_DATA \
-#     --json_list             dataset_swincross_temporal.json \
-#     --infer_overlap 0.7 --in_channels 2 --out_channels 3 \
-#     --roi_x 96 --roi_y 96 --roi_z 96 \
-#     --workers 2 --sw_batch_size 4 --skip_existing \
-#     2>&1 | tee $TEMPORAL_OUT/inference.log
-
-# banner_eval_temporal
-# CUDA_VISIBLE_DEVICES=0 python3.12 npz_version/evaluate_predictions.py \
-#     --data_dir $TEMPORAL_DATA \
-#     --json_list dataset_swincross_temporal.json \
-#     --output_dir $TEMPORAL_OUT \
-#     2>&1 | tee $TEMPORAL_OUT/evaluation.log
-
-# banner_plot
-# python3.12 plot_metrics.py \
-#     --csv_path "$TEMPORAL_OUT/per_case_evaluation_rich.csv" \
-#     --output_dir "$TEMPORAL_OUT/plots"
-
-# =============================================================================
-# 3. Single-model inference: Temporal per-timepoint stratification & per-stratum plots
-# =============================================================================
-# RICH_CSV="$TEMPORAL_OUT/per_case_evaluation_rich.csv"
-# if [ -f "$RICH_CSV" ]; then
-#     echo "=== Timepoint sub-reports ==="
-#     HEADER=$(head -1 "$RICH_CSV")
-#     TP_COL=$(head -1 "$RICH_CSV" | tr ',' '\n' | grep -n "^timepoint$" | cut -d: -f1)
-
-#     if [ -n "$TP_COL" ]; then
-#         UNIQUE_TPS=$(tail -n+2 "$RICH_CSV" \
-#             | awk -F',' -v col="$TP_COL" '{print $col}' | sort -u | grep -v '^$')
-#         for tp in $UNIQUE_TPS; do
-#             SUB_CSV="$TEMPORAL_OUT/per_case_rich_${tp}.csv"
-#             {
-#                 echo "$HEADER"
-#                 grep -v "^case_id" "$RICH_CSV" \
-#                     | awk -F',' -v col="$TP_COL" -v tp="$tp" '$col == tp'
-#             } > "$SUB_CSV"
-#             N=$(tail -n+2 "$SUB_CSV" | wc -l)
-#             echo "  $tp: $N cases → $SUB_CSV"
-#             python3.12 plot_metrics.py \
-#                 --csv_path   "$SUB_CSV" \
-#                 --output_dir "$TEMPORAL_OUT/plots_${tp}"
-#         done
-#     fi
-# fi
-
-
+if [ "$SKIP_TEMPORAL_KFOLD" = false ]; then
+    run_kfold_ensemble "temporal_zeroshot" $TEMPORAL_DATA $JSON_TEMPORAL
+    generate_temporal_sub_reports "/data/ethan/SwinCross/${KFOLD_BASE_DIR}_ensemble/temporal_zeroshot"
+fi
 
 echo "Pipeline complete."
