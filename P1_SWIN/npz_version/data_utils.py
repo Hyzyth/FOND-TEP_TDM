@@ -241,6 +241,8 @@ def get_loader(args):
     datalist = load_decathlon_datalist(
         datalist_json, True, "training", base_dir=data_dir)
 
+    datalist.sort(key=lambda d: os.path.getsize(d["npz"]), reverse=True)  # Sort by NPZ file size (largest first) to optimize caching
+
     if args.use_normal_dataset or args.cache_rate == 0.0:
         train_ds = data.Dataset(data=datalist, transform=train_transform)
     else:
