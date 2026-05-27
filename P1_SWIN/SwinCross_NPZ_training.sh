@@ -36,7 +36,7 @@ source swincross_env/bin/activate
 [ -f requirements.txt ] && uv pip install -r requirements.txt || { echo "requirements.txt missing"; exit 1; }
 
 # ── Shared hyper-parameters ───────────────────────────────────────────────────
-EPOCH_NUMBER=1000
+EPOCH_NUMBER=400
 MAX_GPU=0                  # GPU index to train on
 
 mkdir -p /data/ethan/SwinCross
@@ -136,12 +136,12 @@ echo ""
 for fold in $(seq 0 $((K_FOLDS - 1))); do
     JSON_FILE="$PPDATA_FOLDER/${JSON_PREFIX}_fold${fold}.json"
     if [ ! -f "$JSON_FILE" ]; then
-        echo "❌  Missing JSON: $JSON_FILE"
+        echo "    Missing JSON: $JSON_FILE"
         echo "    Run SwinCross_NPZ_Dataset_Building.sh first."
         exit 1
     fi
 done
-echo "✅  All ${K_FOLDS} fold JSONs found."
+echo "    All ${K_FOLDS} fold JSONs found."
 echo ""
 
 # ── Main k-fold training loop ─────────────────────────────────────────────────
@@ -168,7 +168,7 @@ for fold in $(seq 0 $((K_FOLDS - 1))); do
         --batch_size    2 \
         --val_every     20 \
         --workers       4 \
-        --cache_rate    0.0 \
+        --cache_rate    0.5 \
         --max_epochs    $EPOCH_NUMBER \
         --warmup_epochs 50 \
         --RandFlipd_prob           0.5 \
@@ -180,7 +180,7 @@ for fold in $(seq 0 $((K_FOLDS - 1))); do
         2>&1 | tee /data/ethan/SwinCross/$MODEL_DIR/training_fold${fold}.log
 
     echo ""
-    echo "✅  Fold ${fold} complete → /data/ethan/SwinCross/$MODEL_DIR/model_best.pth"
+    echo "    Fold ${fold} complete → /data/ethan/SwinCross/$MODEL_DIR/model_best.pth"
     echo ""
 
 done
@@ -223,7 +223,7 @@ echo "         --json_list  ${JSON_PREFIX}_full.json"
 #     --batch_size      2 \
 #     --val_every       20 \
 #     --workers         4 \
-#     --cache_rate      0.0 \
+#     --cache_rate      0.5 \
 #     --RandFlipd_prob           0.5 \
 #     --RandRotate90d_prob       0.5 \
 #     --RandScaleIntensityd_prob 0.2 \
@@ -248,7 +248,7 @@ echo "         --json_list  ${JSON_PREFIX}_full.json"
 #     --batch_size    2 \
 #     --val_every     20 \
 #     --workers       4 \
-#     --cache_rate    0.0 \
+#     --cache_rate    0.5 \
 #     --max_epochs    $EPOCH_NUMBER \
 #     --warmup_epochs 50 \
 #     --RandFlipd_prob           0.5 \
@@ -267,7 +267,7 @@ echo "         --json_list  ${JSON_PREFIX}_full.json"
 #     --json_list  ${JSON_PREFIX}_fold0.json \
 #     --logdir     kfold_debug \
 #     --batch_size 2 \
-#     --cache_rate 0.0 \
+#     --cache_rate 0.5 \
 #     --max_epochs 2 \
 #     --val_every  1 \
 #     --workers    4 \
