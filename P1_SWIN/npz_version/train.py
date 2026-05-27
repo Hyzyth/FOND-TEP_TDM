@@ -13,10 +13,12 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+import torch.nn as nn
 import torch.nn.parallel
 import torch.utils.data.distributed
 from monai.inferers.utils import sliding_window_inference
 from monai.losses.dice import DiceFocalLoss
+from monai.losses.tversky import TverskyLoss
 from monai.metrics.meandice import DiceMetric
 from monai.transforms.compose import Compose
 from monai.transforms.post.array import Activations, AsDiscrete
@@ -34,6 +36,40 @@ from optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 from trainer import run_training
 
 warnings.filterwarnings("ignore")
+
+# ── Custom Loss: Focal Tversky Loss ───────────────────────────────────────
+class FocalTverskyLoss(nn.Module):
+    def __init__(
+        self,
+        alpha=0.3,
+        beta=0.7,
+        gamma=0.75,
+        smooth_nr=1e-5,
+        smooth_dr=1e-5,
+    ):
+        super().__init__()
+
+        self.gamma = gamma
+
+        self.tversky = TverskyLoss(
+            to_onehot_y=True,
+            softmax=True,
+            smooth_nr=smooth_nr,
+            smooth_dr=smooth_dr,
+            alpha=alpha,
+            beta=beta,
+            reduction="none",   # IMPORTANT
+        )
+
+    def forward(self, y_pred, y_true):
+
+        # MONAI TverskyLoss already returns (1 - TI)
+        loss = self.tversky(y_pred, y_true)
+
+        # Focal modulation
+        loss = loss ** self.gamma
+
+        return loss.mean()
 
 parser = argparse.ArgumentParser(description="SwinCross training pipeline")
 parser.add_argument("--checkpoint",        default=None,         help="Resume from checkpoint")
@@ -90,9 +126,9 @@ parser.add_argument("--warmup_epochs",     default=50,   type=int)
 parser.add_argument("--resume_ckpt",       action="store_true")
 parser.add_argument("--smooth_dr",         default=1e-5, type=float)
 parser.add_argument("--smooth_nr",         default=1e-5, type=float)
-parser.add_argument("--gamma",             default=2.0,  type=float)
-parser.add_argument("--lambda_dice",       default=1.0,  type=float)
-parser.add_argument("--lambda_focal",      default=1.0,  type=float)
+parser.add_argument("--gamma",             default=0.75,  type=float)
+parser.add_argument("--alpha",             default=0.3,  type=float) # FP Penalty
+parser.add_argument("--beta",              default=0.7,  type=float) # FN Penalty
 parser.add_argument("--cache_rate",        default=1.0,  type=float,
                     help="Fraction of training data to cache in RAM. "
                          "0.0 = no cache (always fast with NPZ).")
@@ -165,15 +201,12 @@ def main_worker(gpu, args):
         print("Loaded pretrained weights from", ckpt_path)
 
     # ── Loss ──────────────────────────────────────────────────────────────
-    dice_loss = DiceFocalLoss(
-        to_onehot_y=True,
-        softmax=True,
-        squared_pred=True,
+    focal_tversky_loss = FocalTverskyLoss(
+        alpha=args.alpha,
+        beta=args.beta,
+        gamma=args.gamma,
         smooth_nr=args.smooth_nr,
         smooth_dr=args.smooth_dr,
-        gamma=args.gamma,
-        lambda_dice=args.lambda_dice,
-        lambda_focal=args.lambda_focal,
     )
 
     # ── Metrics ───────────────────────────────────────────────────────────
@@ -260,7 +293,7 @@ def main_worker(gpu, args):
         train_loader=loader[0],
         val_loader=loader[1],
         optimizer=optimizer,
-        loss_func=dice_loss,
+        loss_func=focal_tversky_loss,
         acc_func=dice_acc,
         args=args,
         model_inferer=model_inferer,
