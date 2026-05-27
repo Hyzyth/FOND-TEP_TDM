@@ -18,7 +18,7 @@ set -e
 # ║                          GLOBAL CONFIGURATION                          ║
 # ╚════════════════════════════════════════════════════════════════════════╝
 # ── 1. Execution Toggles (Set to true to run, false to skip) ───────────────
-RUN_CLASSIC_TRAIN=false
+RUN_CLASSIC_TRAIN=true
 RUN_CLASSIC_RESUME=false
 
 RUN_KFOLD_TRAIN=true
@@ -26,8 +26,8 @@ RUN_KFOLD_PRODUCTION_FULL=false  # Trains a final model on 100% of the train poo
 
 # ── 2. Hardware & Hyperparameters ──────────────────────────────────────────
 GPU=0
-EPOCH_NUMBER_CLASSIC=1000
-EPOCH_NUMBER_KFOLD=400
+EPOCH_NUMBER_CLASSIC=1500
+EPOCH_NUMBER_KFOLD=500
 BATCH_SIZE=2
 CACHE_RATE=0.35  # Set to 0.0 if you lack RAM
 
