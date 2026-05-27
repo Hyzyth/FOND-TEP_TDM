@@ -131,6 +131,16 @@ def run_training(
         if args.rank == 0 and writer is not None:
             writer.add_scalar("val/dice", init_mean_acc, 0)
             writer.add_scalar("val/loss", init_val_loss, 0)
+        
+            # Extract state dict (handling DDP wrapping if applicable)
+            init_state = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
+            
+            # Save trimmed checkpoint (weights only)
+            torch.save(
+                {"state_dict": init_state}, 
+                os.path.join(args.logdir, "model_init.pth")
+            )
+            print(f"[{init_end}] Saved initial random weights to model_init.pth", flush=True)
 
     # ══════════════════════════════════════════════════════════════════════
     # Epoch loop
