@@ -291,6 +291,28 @@ def main():
             writer.writerow(row)
         first_write = False
 
+    # Compute the means
+    try:
+        import pandas as pd
+        df = pd.read_csv(csv_path)
+
+        # Only compute for numeric columns
+        numeric_cols = df.select_dtypes(includes=['float64', 'int64']).columns
+        mean_values = df[numeric_cols].mean().round(4).to_dict()
+
+        # Create a new row representing the mean
+        mean_row = {field: "" for field in CSV_FIELDS}
+        mean_row.update(mean_values)
+        mean_row["case_id"] = "MEAN"
+        mean_row["patient"] = "ALL_CASES"
+        mean_row["comments"] = f"Average across {len(df)} cases"
+
+        # Append the mean row to the CSV
+        pd.DataFrame([mean_row]).to_csv(csv_path, mode='a', header=False, index=False)
+        print(f"\nAppended mean values to CSV.")
+    except ImportError:
+        print("\nPandas not installed. Skipping mean calculation.")
+
     print(f"\nCSV → {csv_path}")
 
 
