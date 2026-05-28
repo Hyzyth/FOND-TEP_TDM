@@ -121,20 +121,20 @@ class LoadNPZd(Transform):
         d        = dict(data_dict)
         npz_path = str(d["npz"])
 
-        npz = np.load(npz_path, allow_pickle=False)
+        # Use a 'with' block to ensure the file is closed immediately
+        with np.load(npz_path, allow_pickle=False) as npz:
+            # Extract, cast back to float32, and fuse: (2, R, A, S)
+            pet_arr = npz["pet"].astype(np.float32)
+            ct_arr  = npz["ct"].astype(np.float32)
+            d["image"] = np.stack([pet_arr, ct_arr], axis=0)
 
-        # Extract, cast back to float32, and fuse: (2, R, A, S) — ch0=PET, ch1=CT
-        pet_arr = npz["pet"].astype(np.float32)
-        ct_arr  = npz["ct"].astype(np.float32)
-        d["image"] = np.stack([pet_arr, ct_arr], axis=0)
+            # label: (R, A, S) → (1, R, A, S)  int64
+            d["label"] = npz["label"].copy().astype(np.int64)[np.newaxis]
 
-        # label: (R, A, S) → (1, R, A, S)  int64   (channel dim expected by MONAI)
-        d["label"] = npz["label"].copy().astype(np.int64)[np.newaxis]
-
-        # Inverse-transform metadata (consumed by test.py; ignored during training)
-        for k in self._META_KEYS:
-            if k in npz:
-                d[k] = npz[k].copy()
+            # Inverse-transform metadata
+            for k in self._META_KEYS:
+                if k in npz:
+                    d[k] = npz[k].copy()
 
         d["npz_path"] = npz_path
         return d
@@ -221,9 +221,7 @@ def get_loader(args):
             num_workers=n_workers,
             sampler=sampler,
             pin_memory=True,
-            # Keep worker processes alive between batches — eliminates
-            # per-epoch spawn overhead (was mistakenly commented out).
-            persistent_workers=(n_workers > 0),
+            persistent_workers=False,
             # Each worker pre-loads 2 batches so GPU never idles on I/O.
             prefetch_factor=(2 if n_workers > 0 else None),
         )
