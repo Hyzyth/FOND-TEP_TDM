@@ -29,7 +29,7 @@ GPU=0
 EPOCH_NUMBER_CLASSIC=1500
 EPOCH_NUMBER_KFOLD=500
 BATCH_SIZE=2
-CACHE_RATE=0.1  # Set to 0.0 if you lack RAM
+CACHE_RATE=0.5  # Set to 0.0 if you lack RAM
 
 # ── 3. Data Paths & Naming ─────────────────────────────────────────────────
 PPDATA_FOLDER="/data/ethan/PP_hecktor2026_kfold_npz"
