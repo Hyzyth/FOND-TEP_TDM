@@ -218,7 +218,7 @@ def main_worker(gpu, args):
     )
 
     def amp_predictor(x):
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=torch.cuda.is_available()):
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=torch.cuda.is_available()):
             return model(x)
     
     model_inferer = partial(
