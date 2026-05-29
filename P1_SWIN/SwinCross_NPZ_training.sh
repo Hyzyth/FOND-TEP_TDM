@@ -26,10 +26,11 @@ RUN_KFOLD_PRODUCTION_FULL=false  # Trains a final model on 100% of the train poo
 
 # ── 2. Hardware & Hyperparameters ──────────────────────────────────────────
 GPU=0
-EPOCH_NUMBER_CLASSIC=1500
-EPOCH_NUMBER_KFOLD=500
 BATCH_SIZE=2
 CACHE_RATE=0.5  # Set to 0.0 if you lack RAM
+K_FOLDS=5
+EPOCH_NUMBER_CLASSIC=1500
+EPOCH_NUMBER_KFOLD=$(($EPOCH_NUMBER_CLASSIC / $K_FOLDS)) # Adjust epochs for k-fold to keep total training time similar to classic
 
 # ── 3. Data Paths & Naming ─────────────────────────────────────────────────
 PPDATA_FOLDER="/data/ethan/PP_hecktor2026_kfold_npz"
@@ -37,7 +38,7 @@ JSON_PREFIX="dataset_swincross_2026kfold"
 
 CLASSIC_MODEL_DIR="HECKTOR_run_${EPOCH_NUMBER_CLASSIC}_epoch"
 KFOLD_BASE_DIR="HECKTOR_kfold_${EPOCH_NUMBER_KFOLD}ep"
-K_FOLDS=5
+
 
 
 # ╔════════════════════════════════════════════════════════════════════════╗
