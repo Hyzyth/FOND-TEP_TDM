@@ -21,15 +21,15 @@ fi
 echo "[INFO] Ensuring required modules (pandas, matplotlib) are installed/updated..."
 if command -v uv &> /dev/null; then
     # Use ultra-fast uv pip if it exists in your env
-    uv pip install --upgrade pandas matplotlib
+    uv pip install --upgrade pandas matplotlib "numpy<2.0.0"
 else
     # Fallback to standard pip
-    pip install --upgrade pandas matplotlib
+    pip install --upgrade pandas matplotlib "numpy<2.0.0"
 fi
 
 # ── 3. Configuration ──────────────────────────────────────────────────────────
 # Match these to your training directories
-CLASSIC_DIR="./runs/HECKTOR_run_1000_epoch"
+CLASSIC_DIR="./runs/HECKTOR_run_1500_epoch"
 KFOLD_BASE="./runs/HECKTOR_kfold_400ep"
 
 # ── 4. Execute Classic Plotting ───────────────────────────────────────────────
@@ -39,7 +39,7 @@ if [ -d "$CLASSIC_DIR" ]; then
     python3.12 plot_training.py \
         --log_dirs "$CLASSIC_DIR" \
         --output_dir "$CLASSIC_DIR/plots" \
-        --title "Classic Run (1000 Epochs)"
+        --title "Classic Run (1500 Epochs)"
 else
     echo "[SKIP] Classic directory not found: $CLASSIC_DIR"
 fi
