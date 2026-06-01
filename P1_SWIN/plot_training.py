@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 # Set a cleaner, modern aesthetic
-sns.set_theme(style="darkgrid", context="talk")
+sns.set_theme(style="darkgrid", context="paper")
 
 def parse_logs(log_directory):
     """
