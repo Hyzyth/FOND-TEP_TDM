@@ -22,6 +22,7 @@ import torch
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.tensorboard import SummaryWriter
 from monai.data.utils import decollate_batch
+from monai.metrics import DiceMetric
 
 def _format_time(seconds):
     """Formats seconds into d h m s."""
@@ -92,6 +93,10 @@ def run_training(
 
     best_acc  = float(start_best_acc)
     best_epoch = -1
+    
+    # ── Per-Class Metric Setup ────────────────────────────────────────────
+    # Setting reduction="none" preserves both batch and class dimensions.
+    per_class_acc_func = DiceMetric(include_background=True, reduction="none")
 
     # ── Time Tracking Initialization ──────────────────────────────────────
     global_start_time = time.time()
@@ -108,36 +113,45 @@ def run_training(
         acc_func.reset()
         init_val_loss = 0.0
         init_val_steps = 0
+
         with torch.no_grad():
             for val_data in val_loader:
                 init_val_steps += 1
                 val_outputs_gpu = model_inferer(val_data["image"].to(device))
-                # Use .to(device) or .cuda() to move labels
                 val_labels_gpu = val_data["label"].to(device)
+                
                 val_outputs_list = [post_pred(i) for i in decollate_batch(val_outputs_gpu)]
                 val_labels_list = [post_label(i) for i in decollate_batch(val_labels_gpu)]
-                # explicitly cast to float32 to prevent FP16 log(0) underflow in Focal Loss
+                
                 init_val_loss += loss_func(val_outputs_gpu.float(), val_labels_gpu.float()).item()
+                
                 acc_func(y_pred=val_outputs_list, y=val_labels_list)
+                per_class_acc_func(y_pred=val_outputs_list, y=val_labels_list)
+                
                 del val_outputs_gpu, val_labels_gpu, val_outputs_list, val_labels_list
+
         init_mean_acc = acc_func.aggregate().item()
+
+        # Calculate mean across the dataset (dim=0), resulting in shape (num_classes,)
+        init_per_class = per_class_acc_func.aggregate().mean(dim=0).cpu().numpy()
+        bg_d     = init_per_class[0] if len(init_per_class) > 0 else 0.0
+        tumor_d  = init_per_class[1] if len(init_per_class) > 1 else 0.0
+        nodule_d = init_per_class[2] if len(init_per_class) > 2 else 0.0
+
         acc_func.reset()
         init_val_loss /= init_val_steps
         init_end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{init_end}] Initial Validation Complete | Dice: {init_mean_acc:.4f} | Val loss: {init_val_loss:.4f}\n", flush=True)
+        print(f"[{init_end}] Initial Validation Complete | Dice: {init_mean_acc:.4f} | Val loss: {init_val_loss:.4f} | BG: {bg_d:.4f} | Tumor: {tumor_d:.4f} | Nodule: {nodule_d:.4f}\n", flush=True)
         
         if args.rank == 0 and writer is not None:
             writer.add_scalar("val/dice", init_mean_acc, 0)
             writer.add_scalar("val/loss", init_val_loss, 0)
+            writer.add_scalar("val/dice_bg", bg_d, 0)
+            writer.add_scalar("val/dice_tumor", tumor_d, 0)
+            writer.add_scalar("val/dice_nodule", nodule_d, 0)
         
-            # Extract state dict (handling DDP wrapping if applicable)
             init_state = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
-            
-            # Save trimmed checkpoint (weights only)
-            torch.save(
-                {"state_dict": init_state}, 
-                os.path.join(args.logdir, "model_init.pth")
-            )
+            torch.save({"state_dict": init_state}, os.path.join(args.logdir, "model_init.pth"))
             print(f"[{init_end}] Saved initial random weights to model_init.pth", flush=True)
 
     # ══════════════════════════════════════════════════════════════════════
@@ -234,6 +248,7 @@ def run_training(
 
             model.eval()
             acc_func.reset()
+            per_class_acc_func.reset()
             val_loss  = 0.0
             val_steps = 0
 
@@ -242,26 +257,29 @@ def run_training(
                     val_steps += 1
 
                     val_outputs_gpu = model_inferer(val_data["image"].to(device))
-
                     val_labels_gpu = val_data["label"].to(device)
 
-                    val_outputs_list = [
-                        post_pred(i) for i in decollate_batch(val_outputs_gpu)
-                    ]
-                    val_labels_list = [
-                        post_label(i) for i in decollate_batch(val_labels_gpu)
-                    ]
+                    val_outputs_list = [post_pred(i) for i in decollate_batch(val_outputs_gpu)]
+                    val_labels_list = [post_label(i) for i in decollate_batch(val_labels_gpu)]
 
-                    # explicitly cast to float32 to prevent FP16 log(0) underflow in Focal Loss
                     val_loss_batch = loss_func(val_outputs_gpu.float(), val_labels_gpu.float())
                     val_loss += val_loss_batch.item()
 
                     acc_func(y_pred=val_outputs_list, y=val_labels_list)
+                    per_class_acc_func(y_pred=val_outputs_list, y=val_labels_list)
 
                     del val_outputs_gpu, val_labels_gpu, val_outputs_list, val_labels_list
 
             mean_acc      = acc_func.aggregate().item()
+
+            per_class = per_class_acc_func.aggregate().mean(dim=0).cpu().numpy()
+            bg_d     = per_class[0] if len(per_class) > 0 else 0.0
+            tumor_d  = per_class[1] if len(per_class) > 1 else 0.0
+            nodule_d = per_class[2] if len(per_class) > 2 else 0.0
+
             acc_func.reset()
+            per_class_acc_func.reset()
+
             val_loss     /= val_steps
             one_dice_metric = 1.0 - mean_acc
 
@@ -269,6 +287,10 @@ def run_training(
                 writer.add_scalar("val/dice",          mean_acc,       epoch)
                 writer.add_scalar("val/loss",          val_loss,       epoch)
                 writer.add_scalar("val/one_minus_dice", one_dice_metric, epoch)
+                
+                writer.add_scalar("val/dice_bg",     bg_d,     epoch)
+                writer.add_scalar("val/dice_tumor",  tumor_d,  epoch)
+                writer.add_scalar("val/dice_nodule", nodule_d, epoch)
 
                 val_duration = time.time() - val_start_time
                 total_val_time += val_duration
@@ -278,6 +300,7 @@ def run_training(
                 print(
                     f"[{val_end_str}] Epoch {epoch+1} Validation Dice: {mean_acc:.4f} (Best: {best_acc:.4f}) | "
                     f"1-Dice: {one_dice_metric:.4f} | Val loss: {val_loss:.4f}\n"
+                    f"      ↳ Per-Class: BG={bg_d:.4f} | Tumor={tumor_d:.4f} | Nodule={nodule_d:.4f}\n"
                     f"      ↳ Val Time: {val_duration:.1f}s | Script Elapsed: {_format_time(elapsed_sec)}\n",
                     flush=True,
                 )

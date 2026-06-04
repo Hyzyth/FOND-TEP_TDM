@@ -19,9 +19,9 @@ set -e
 # ╚════════════════════════════════════════════════════════════════════════╝
 # ── 1. Execution Toggles (Set to true to run, false to skip) ───────────────
 RUN_CLASSIC_TRAIN=false
-RUN_CLASSIC_RESUME=false
+RUN_CLASSIC_RESUME=true
 
-RUN_KFOLD_TRAIN=true
+RUN_KFOLD_TRAIN=false
 RUN_KFOLD_PRODUCTION_FULL=false  # Trains a final model on 100% of the train pool
 
 # ── 2. Hardware & Hyperparameters ──────────────────────────────────────────
