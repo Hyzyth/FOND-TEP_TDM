@@ -5,9 +5,9 @@ infer.py  —  3-class DualwaveSAM inference on HECKTOR 2026 NPZ
 Pipeline per patient:
   1. Load NPZ (already preprocessed to RAS 1mm isotropic, foreground-cropped)
   2. Feed axial slices through the model (batched, FP16)
-  3. Reassemble slice predictions → (R, A, S) volume
+  3. Reassemble slice predictions -> (R, A, S) volume
   4. Resize back to original crop-space resolution
-  5. Inverse transform: uncrop → RAS full volume → resample to original CT space
+  5. Inverse transform: uncrop -> RAS full volume -> resample to original CT space
   6. Save <case_id>_Pred.nii.gz  (compatible with evaluate_predictions.py)
 
 Usage:
@@ -72,14 +72,14 @@ def _remove_small_objects(pred: np.ndarray, spacing_mm: tuple) -> np.ndarray:
 
 def inverse_transform(pred_crop: np.ndarray, npz_data, ras_spacing) -> sitk.Image:
     """
-    Undo offline preprocessing: uncrop → full RAS volume → original CT space.
+    Undo offline preprocessing: uncrop -> full RAS volume -> original CT space.
     """
     ras_size  = [int(x) for x in npz_data["ras_size_itk"]]
     full_pred = np.zeros((ras_size[0], ras_size[1], ras_size[2]), dtype=np.uint8)
     cs, ce    = npz_data["crop_start"], npz_data["crop_end"]
     full_pred[cs[0]:ce[0], cs[1]:ce[1], cs[2]:ce[2]] = pred_crop
 
-    # MONAI (R,A,S) → ITK (S,A,R)
+    # MONAI (R,A,S) -> ITK (S,A,R)
     arr_itk  = full_pred.transpose(2, 1, 0).astype(np.uint8)
     pred_sitk = sitk.GetImageFromArray(arr_itk)
     pred_sitk.SetSpacing(ras_spacing)
@@ -130,7 +130,7 @@ def infer_patient(
     ct_vol  = normalise_ct(ct_vol)
     pet_vol = normalise_pet(pet_vol)
 
-    # (R, A, S) → (S, R, A)
+    # (R, A, S) -> (S, R, A)
     ct_slices  = np.moveaxis(ct_vol,  SLICE_AXIS, 0)   # (S, R, A)
     pet_slices = np.moveaxis(pet_vol, SLICE_AXIS, 0)
 
@@ -161,7 +161,7 @@ def infer_patient(
                 else:
                     pred_slices[s] = preds[i]
 
-    # (S, R, A) → (R, A, S)
+    # (S, R, A) -> (R, A, S)
     pred_vol = np.moveaxis(pred_slices, 0, SLICE_AXIS)
     return pred_vol, npz_meta
 
@@ -243,7 +243,7 @@ def main():
             print(f"❌ [{idx+1}/{len(entries)}] NPZ not found: {npz_path}")
             continue
 
-        print(f"→  [{idx+1}/{len(entries)}] {case_id}")
+        print(f"->  [{idx+1}/{len(entries)}] {case_id}")
 
         # ── 1. Slice-wise inference + metadata in one NPZ open ────────────
         pred_crop, npz_data = infer_patient(npz_path, model, device,
@@ -256,7 +256,7 @@ def main():
         pred_crop = _remove_border_objects(pred_crop)
         pred_crop = _remove_small_objects(pred_crop, spacing_mm=ras_spacing)
 
-        # ── 3. Inverse transform → original CT space ─────────────────────
+        # ── 3. Inverse transform -> original CT space ─────────────────────
         pred_sitk = inverse_transform(pred_crop, npz_data, ras_spacing)
 
         sitk.WriteImage(pred_sitk, out_path)

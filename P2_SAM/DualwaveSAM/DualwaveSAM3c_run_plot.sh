@@ -20,7 +20,7 @@ if [ -d "dualwave_env" ]; then
     source dualwave_env/bin/activate
     echo "[INFO] Activated dualwave_env."
 else
-    echo "[WARN] dualwave_env not found — using system Python."
+    echo "[WARN] dualwave_env not found - using system Python."
 fi
 
 if command -v uv &> /dev/null; then
@@ -31,7 +31,7 @@ fi
 
 # ── 2. Configuration ──────────────────────────────────────────────────────
 # Match these to your training script settings
-TEST_DIR="./runs/DualwaveSAM3c_test"
+#TEST_DIR="./runs/DualwaveSAM3c_test"
 CLASSIC_DIR="./runs/DualwaveSAM3c_classic_325ep"
 KFOLD_BASE="./runs/DualwaveSAM3c_kfold_65ep"
 

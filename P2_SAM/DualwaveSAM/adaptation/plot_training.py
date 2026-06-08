@@ -1,5 +1,5 @@
 """
-plot_training.py  —  DualwaveSAM training log plotter
+plot_training.py  -  DualwaveSAM training log plotter
 ======================================================
 
 Thin wrapper that re-uses the SwinCross plot_training.py parser verbatim.
@@ -69,12 +69,13 @@ def parse_logs(log_directory: str):
     )
     
     if not log_files:
-        print(f"  ⚠  No .log files in {log_directory}")
+        print(f" INFO:  No .log files in {log_directory}")
         return pd.DataFrame(), pd.DataFrame()
 
     for log_path in log_files:
         with open(log_path, "r", encoding="utf-8", errors="replace") as f:
             current_val_epoch = None
+            in_val_phase = False  # <-- STRICT PHASE GATE
             
             for line in f:
                 # 1. Parse Training
@@ -85,6 +86,7 @@ def parse_logs(log_directory: str):
                         "Learning_Rate": float(m.group(3)),
                         "Time_Seconds":  float(m.group(4)),
                     }
+                    in_val_phase = False  # Ensure gate is closed during training
                     continue
 
                 # 2. Parse Initial Validation (Epoch 0)
@@ -105,21 +107,23 @@ def parse_logs(log_directory: str):
                     current_val_epoch = int(m.group(1))
                     if current_val_epoch not in val_data:
                         val_data[current_val_epoch] = {}
+                    in_val_phase = True  # <--- OPEN THE GATE FOR VALIDATION
                     continue
 
-                # 4. Parse Regular Validation Metrics (Requires current_val_epoch)
+                # 4. Parse Regular Validation Metrics
                 m = val_dice_pat.search(line)
-                if m and current_val_epoch is not None:
+                if m and in_val_phase and current_val_epoch is not None:
                     val_data[current_val_epoch]["Dice"]     = float(m.group(1))
                     val_data[current_val_epoch]["Val_Loss"] = float(m.group(2))
                     continue
 
                 # 5. Parse Regular Validation Per-Class Metrics
                 m = per_class_pat.search(line)
-                if m and current_val_epoch is not None:
+                if m and in_val_phase and current_val_epoch is not None:
                     val_data[current_val_epoch]["BG_Dice"]     = float(m.group(1))
                     val_data[current_val_epoch]["Tumor_Dice"]  = float(m.group(2))
                     val_data[current_val_epoch]["Nodule_Dice"] = float(m.group(3))
+                    in_val_phase = False  # <--- SLAM GATE SHUT IMMEDIATELY
                     continue
 
     df_train = (
@@ -207,7 +211,7 @@ def plot_single_run(df_train, df_val, output_dir: str, title: str):
     out    = os.path.join(output_dir, f"training_plots_ep{max_ep}.png")
     plt.savefig(out, dpi=300)
     plt.close(fig)
-    print(f"  Classic plot → {out}")
+    print(f"  Classic plot -> {out}")
 
 
 def plot_kfold_run(train_dfs, val_dfs, output_dir: str, title: str):
@@ -291,7 +295,7 @@ def plot_kfold_run(train_dfs, val_dfs, output_dir: str, title: str):
     out    = os.path.join(output_dir, f"kfold_training_plots_ep{max_ep}.png")
     plt.savefig(out, dpi=300)
     plt.close(fig)
-    print(f"  K-Fold plot → {out}")
+    print(f"  K-Fold plot -> {out}")
 
 
 if __name__ == "__main__":

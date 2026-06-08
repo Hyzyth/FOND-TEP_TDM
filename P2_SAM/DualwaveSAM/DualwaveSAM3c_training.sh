@@ -28,13 +28,13 @@ RUN_KFOLD_PRODUCTION_FULL=false   # Train on 100% of pool (no held-out val)
 
 # ── 2. Hardware & Hyperparameters ──────────────────────────────────────────
 GPU=0
-BATCH_SIZE=48           # 2D slices — can be much larger than 3D patch batches
+BATCH_SIZE=48           # 2D slices - can be much larger than 3D patch batches
 VAL_EVERY=1             # Validate every N epochs
 WARMUP_CLASSIC=10
 WARMUP_KFOLD=3
 LRATE=5e-5
 
-EPOCH_NUMBER_CLASSIC=325
+EPOCH_NUMBER_CLASSIC=300
 K_FOLDS=5
 KFOLD_START=0
 # Scale kfold epochs to keep total GPU time comparable to classic run
@@ -47,12 +47,10 @@ WAVELET="haar"          # haar | db2 | db3 | sym4 (PyWavelets name)
 NUM_CLASSES=3           # 0=background, 1=GTVp, 2=GTVn
 
 # ── 4. Loss Hyperparameters ────────────────────────────────────────────────
-ALPHA=0.5               # Tversky FP penalty (lower → more aggressive on FP)
-BETA=0.5                # Tversky FN penalty (higher → more aggressive on FN)
-GAMMA=1.0               # Focal exponent
-WEIGHT_PRIMARY=0.7      # Primary head loss weight
-WEIGHT_AUX=0.3          # Auxiliary head loss weight
-BG_RATIO=0.3
+LAMBDA1=0.01            # MAE (L1) loss weight for regularization
+LAMBDA2=0.1             # MSE (L2) loss weight for regularization
+GAMMA=2.0               # Focal exponent
+BG_RATIO=0.3            # Fraction of background slices
 
 # ── 5. Data Paths ──────────────────────────────────────────────────────────
 PPDATA_FOLDER="/data/ethan/PP_hecktor2026_kfold_npz"
@@ -72,7 +70,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"   # go to DualwaveSAM root
 
 if ! command -v uv &> /dev/null; then
-    echo "uv not found — installing..."
+    echo "uv not found - installing..."
     wget -qO- https://astral.sh/uv/install.sh | sh
     source "$HOME/.local/bin/env"
 fi
@@ -81,7 +79,7 @@ uv python install 3.12
 [ ! -d "dualwave_env" ] && uv venv dualwave_env --python 3.12
 source dualwave_env/bin/activate
 [ -f requirements.txt ] && uv pip install -r requirements.txt || \
-    { echo "[WARN] requirements.txt not found — ensure deps are installed"; }
+    { echo "[WARN] requirements.txt not found - ensure deps are installed"; }
 
 mkdir -p /data/ethan/DualwaveSAM3c
 ln -sfn /data/ethan/DualwaveSAM3c ./runs
@@ -188,8 +186,8 @@ if [ "$RUN_TEST" = true ]; then
         --wavelet       "$WAVELET" \
         --num_classes   $NUM_CLASSES \
         --bg_ratio      $BG_RATIO \
-        --alpha         $ALPHA \
-        --beta          $BETA \
+        --lambda1       $LAMBDA1 \
+        --lambda2       $LAMBDA2 \
         --gamma         $GAMMA \
         --lrschedule    warmup_cosine \
         --gpu           0 \
@@ -231,11 +229,9 @@ if [ "$RUN_CLASSIC_TRAIN" = true ]; then
         --wavelet       "$WAVELET" \
         --num_classes   $NUM_CLASSES \
         --bg_ratio      $BG_RATIO \
-        --alpha         $ALPHA \
-        --beta          $BETA \
+        --lambda1       $LAMBDA1 \
+        --lambda2       $LAMBDA2 \
         --gamma         $GAMMA \
-        --weight_primary $WEIGHT_PRIMARY \
-        --weight_aux    $WEIGHT_AUX \
         --lrschedule    warmup_cosine \
         --gpu           0 \
         2>&1 | tee /data/ethan/DualwaveSAM3c/$CLASSIC_MODEL_DIR/training_scratch.log
@@ -243,7 +239,7 @@ fi
 
 # ── A'. CLASSIC RESUME ────────────────────────────────────────────────────
 if [ "$RUN_CLASSIC_RESUME" = true ]; then
-    echo "  ▶ Resuming Classic Training from model_last.pth."
+    echo "  > Resuming Classic Training from model_last.pth."
 
     NEXT_JSON=""
     if [ "$RUN_KFOLD_TRAIN" = true ]; then
@@ -269,10 +265,10 @@ if [ "$RUN_CLASSIC_RESUME" = true ]; then
         --n_filters     $N_FILTERS \
         --wavelet       "$WAVELET" \
         --num_classes   $NUM_CLASSES \
-        --alpha         $ALPHA \
-        --beta          $BETA \
-        --gamma         $GAMMA \
         --bg_ratio      $BG_RATIO \
+        --lambda1       $LAMBDA1 \
+        --lambda2       $LAMBDA2 \
+        --gamma         $GAMMA \
         --lrschedule    warmup_cosine \
         --gpu           0 \
         2>&1 | tee /data/ethan/DualwaveSAM3c/$CLASSIC_MODEL_DIR/training_resume.log
@@ -310,7 +306,7 @@ if [ "$RUN_KFOLD_TRAIN" = true ]; then
         MODEL_DIR="${KFOLD_BASE_DIR}_fold${fold}"
         mkdir -p /data/ethan/DualwaveSAM3c/$MODEL_DIR
 
-        echo "  ▶ Fold ${fold} / $((K_FOLDS - 1))"
+        echo "  > Fold ${fold} / $((K_FOLDS - 1))"
         CUDA_VISIBLE_DEVICES=$GPU \
         python3.12 adaptation/train.py \
             --data_dir      "$PPDATA_FOLDER" \
@@ -326,16 +322,14 @@ if [ "$RUN_KFOLD_TRAIN" = true ]; then
             --wavelet       "$WAVELET" \
             --num_classes   $NUM_CLASSES \
             --bg_ratio      $BG_RATIO \
-            --alpha         $ALPHA \
-            --beta          $BETA \
+            --lambda1       $LAMBDA1 \
+            --lambda2       $LAMBDA2 \
             --gamma         $GAMMA \
-            --weight_primary $WEIGHT_PRIMARY \
-            --weight_aux    $WEIGHT_AUX \
             --lrschedule    warmup_cosine \
             --gpu           0 \
             2>&1 | tee /data/ethan/DualwaveSAM3c/$MODEL_DIR/training_fold${fold}.log
         
-        echo "  [✓] Fold ${fold} complete."
+        echo "  [V] Fold ${fold} complete."
     done
 fi
 
@@ -364,10 +358,10 @@ if [ "$RUN_KFOLD_PRODUCTION_FULL" = true ]; then
         --n_filters     $N_FILTERS \
         --wavelet       "$WAVELET" \
         --num_classes   $NUM_CLASSES \
-        --alpha         $ALPHA \
-        --beta          $BETA \
-        --gamma         $GAMMA \
         --bg_ratio      $BG_RATIO \
+        --lambda1       $LAMBDA1 \
+        --lambda2       $LAMBDA2 \
+        --gamma         $GAMMA \
         --lrschedule    warmup_cosine \
         --gpu           0 \
         2>&1 | tee /data/ethan/DualwaveSAM3c/$FULL_MODEL_DIR/training_production_full.log

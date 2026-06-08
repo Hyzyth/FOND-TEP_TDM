@@ -1,5 +1,5 @@
 """
-trainer.py  —  Training + validation loop for 3-class DualwaveSAM
+trainer.py  -  Training + validation loop for 3-class DualwaveSAM
 =================================================================
 
 Structure mirrors SwinCross trainer.py:
@@ -242,7 +242,7 @@ def run_training(
             f"[{ts}] [Epoch {epoch+1}/{args.max_epochs}] "
             f"Loss={epoch_loss:.4f}  LR={lr:.2e}  Time={epoch_dur:.1f}s | "
             f"Elapsed={_fmt_time(elapsed)}\n"
-            f"      ↳ Next Val in: {nv_str} | ETA: {eta_str}",
+            f"      -> Next Val in: {nv_str} | ETA: {eta_str}",
             flush=True,
         )
 
@@ -280,8 +280,8 @@ def run_training(
             print(
                 f"[{ts}] Val Dice={mean_dice:.4f} (Best={best_acc:.4f}) | "
                 f"1-Dice={one_minus_dice:.4f} | Loss={val_loss:.4f}\n"
-                f"      ↳ Per-Class: BG={bg_d:.4f} | Tumor={tumor_d:.4f} | Nodule={nodule_d:.4f}\n"
-                f"      ↳ Val time={val_dur:.1f}s | Elapsed={_fmt_time(elapsed)}\n",
+                f"      -> Per-Class: BG={bg_d:.4f} | Tumor={tumor_d:.4f} | Nodule={nodule_d:.4f}\n"
+                f"      -> Val time={val_dur:.1f}s | Elapsed={_fmt_time(elapsed)}\n",
                 flush=True,
             )
 
@@ -311,7 +311,7 @@ def run_training(
                 )
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 print(
-                    f"[{ts}] ★ New best | Epoch={best_epoch} | Dice={best_acc:.4f}",
+                    f"[{ts}] [x] New best | Epoch={best_epoch} | Dice={best_acc:.4f}",
                     flush=True,
                 )
 

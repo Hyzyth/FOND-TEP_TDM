@@ -69,7 +69,7 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
     k = len(args.fold_dirs)
-    print(f"Ensembling {k} fold predictions → {args.output_dir}/")
+    print(f"Ensembling {k} fold predictions -> {args.output_dir}/")
 
     json_path = os.path.join(args.data_dir, args.json_list) \
         if not os.path.isabs(args.json_list) else args.json_list

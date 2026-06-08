@@ -22,18 +22,18 @@ set -e
 # ║                          GLOBAL CONFIGURATION                          ║
 # ╚════════════════════════════════════════════════════════════════════════╝
 # ── 1. Execution Toggles (false = skip) ────────────────────────────────────
-SKIP_TEST_RUN=false
-SKIP_CLASSIC_TEST=true
-SKIP_CLASSIC_TRAIN=true
-SKIP_CLASSIC_VAL=true
+SKIP_TEST_RUN=true
+SKIP_CLASSIC_TEST=false
+SKIP_CLASSIC_TRAIN=false
+SKIP_CLASSIC_VAL=false
 
-SKIP_KFOLD_TEST=true
-SKIP_KFOLD_TRAIN=true
-SKIP_KFOLD_VAL=true
+SKIP_KFOLD_TEST=false
+SKIP_KFOLD_TRAIN=false
+SKIP_KFOLD_VAL=false
 
 # ── 2. Hardware & Inference Parameters ────────────────────────────────────
 GPU=0
-INFER_BATCH=32          # Slices per GPU forward pass (2D — can be large)
+INFER_BATCH=32          # Slices per GPU forward pass (2D - can be large)
 
 # ── 3. Data Paths & JSONs ──────────────────────────────────────────────────
 HECKTOR_DATA="/data/ethan/PP_hecktor2026_kfold_npz"
@@ -72,7 +72,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 if [ ! -d "dualwave_env" ]; then
-    echo "dualwave_env not found — run the training script first."
+    echo "dualwave_env not found - run the training script first."
     exit 1
 fi
 source dualwave_env/bin/activate
@@ -107,7 +107,7 @@ run_test_inference() {
         --wavelet     "$WAVELET" \
         --num_classes $NUM_CLASSES \
         --batch_size  $INFER_BATCH \
-        --gpu         $GPU \
+        --gpu         0 \
         --skip_existing \
         2>&1 | tee "$OUT_DIR/inference.log"
     
@@ -152,7 +152,7 @@ run_single_inference() {
         --wavelet     "$WAVELET" \
         --num_classes $NUM_CLASSES \
         --batch_size  $INFER_BATCH \
-        --gpu         $GPU \
+        --gpu         0 \
         --skip_existing \
         2>&1 | tee "$OUT_DIR/inference.log"
 
@@ -207,7 +207,7 @@ run_kfold_ensemble() {
             --wavelet     "$WAVELET" \
             --num_classes $NUM_CLASSES \
             --batch_size  $INFER_BATCH \
-            --gpu         $GPU \
+            --gpu         0 \
             --skip_existing \
             2>&1 | tee "$FOLD_OUT/inference.log"
     done
