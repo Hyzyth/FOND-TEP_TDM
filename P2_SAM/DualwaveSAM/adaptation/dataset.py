@@ -1,5 +1,5 @@
 """
-dataset.py  —  DualwaveSAM HECKTOR 2026 NPZ dataset (2D slice-based)
+dataset.py  -  DualwaveSAM HECKTOR 2026 NPZ dataset (2D slice-based)
 =====================================================================
 
 Loads SwinCross-format NPZ files (ct int16, pet float16, label uint8 0/1/2)
@@ -7,7 +7,7 @@ and exposes axial (S-axis) 2D slices for training.
 
 Key design decisions:
   - Slices along the S (axial / superior-inferior) axis, index 2 of the
-    MONAI (R, A, S) spatial convention — most anatomically consistent with
+    MONAI (R, A, S) spatial convention - most anatomically consistent with
     how DualwaveSAM was originally trained on axial PET/CT slices.
   - 3-class output: 0=background, 1=GTVp, 2=GTVn. The model head is adapted
     to output 3 channels (softmax), replacing the original binary sigmoid.
@@ -35,6 +35,7 @@ import numpy as np
 import torch
 import lmdb
 import pickle
+import scipy.ndimage as ndimage
 from torch.utils.data import Dataset
 from monai.data import LMDBDataset
 
@@ -62,7 +63,7 @@ def normalise_ct(ct_arr: np.ndarray) -> np.ndarray:
     lo = CT_WINDOW_CENTER - CT_WINDOW_WIDTH / 2.0   # -160 HU
     hi = CT_WINDOW_CENTER + CT_WINDOW_WIDTH / 2.0   #  240 HU
     ct = np.clip(ct_arr.astype(np.float32), lo, hi)
-    return (ct - lo) / (hi - lo)   # → [0, 1]
+    return (ct - lo) / (hi - lo)   # -> [0, 1]
 
 
 def normalise_pet(pet_arr: np.ndarray) -> np.ndarray:
@@ -96,7 +97,7 @@ def extract_slices(npz_path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     ct_vol  = normalise_ct(ct_vol)
     pet_vol = normalise_pet(pet_vol)
 
-    # (R, A, S) → (S, R, A)
+    # (R, A, S) -> (S, R, A)
     ct_slices  = np.moveaxis(ct_vol,  SLICE_AXIS, 0)
     pet_slices = np.moveaxis(pet_vol, SLICE_AXIS, 0)
     lbl_slices = np.moveaxis(lbl_vol, SLICE_AXIS, 0)
@@ -117,7 +118,7 @@ class HECKTORNPZDataset(Dataset):
     Slice-level dataset for DualwaveSAM training on HECKTOR 2026 NPZ data.
 
     All slices from all patients are collected at __init__ time (fast, since
-    we only read and normalise the numpy arrays — no heavy I/O per __getitem__).
+    we only read and normalise the numpy arrays - no heavy I/O per __getitem__).
 
     Sampling strategy
     -----------------
@@ -128,7 +129,7 @@ class HECKTORNPZDataset(Dataset):
     __len__ returns len(fg_indices) + int(len(fg_indices) * bg_ratio), which
     sets a "virtual" epoch length.  __getitem__ samples foreground slices for
     the first len(fg_indices) indices and background slices (randomly drawn)
-    for the remainder — giving deterministic foreground coverage per epoch.
+    for the remainder - giving deterministic foreground coverage per epoch.
 
     Parameters
     ----------
@@ -245,27 +246,58 @@ class HECKTORNPZDataset(Dataset):
     @staticmethod
     def _augment(img: np.ndarray, lbl: np.ndarray):
         """
-        Lightweight spatial augmentations applied jointly to image and label.
-        All operations preserve label integer values.
+        Robust spatial augmentations: flips, continuous affine, and elastic deformation.
+        Forces the model to learn true gradient-based boundary separation.
         """
-        # Horizontal flip
+        h, w = img.shape[:2]
+
+        # 1. Flips (Horizontal / Vertical)
         if random.random() < 0.5:
             img = np.flip(img, axis=1).copy()
             lbl = np.flip(lbl, axis=1).copy()
-        # Vertical flip
         if random.random() < 0.5:
             img = np.flip(img, axis=0).copy()
             lbl = np.flip(lbl, axis=0).copy()
-        # 90° rotation (k ∈ {1,2,3})
+
+        # 2. Continuous Affine (Rotation -15° to 15° & Zoom 0.9x to 1.1x)
+        if random.random() < 0.5:
+            angle = random.uniform(-15, 15)
+            scale = random.uniform(0.9, 1.1)
+            center = (w / 2, h / 2)
+            M = cv2.getRotationMatrix2D(center, angle, scale)
+            
+            # Use INTER_LINEAR for images, INTER_NEAREST for labels to preserve 0/1/2 classes
+            img = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+            lbl = cv2.warpAffine(lbl, M, (w, h), flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_REFLECT_101)
+        
+        # 3. Elastic Deformation (Important for boundary disambiguation)
         if random.random() < 0.3:
-            k = random.randint(1, 3)
-            img = np.rot90(img, k, axes=(0, 1)).copy()
-            lbl = np.rot90(lbl, k, axes=(0, 1)).copy()
-        # Mild intensity jitter (image only, not label)
+            # alpha controls distortion intensity; sigma controls smoothness
+            alpha = w * 1.5 
+            sigma = w * 0.08 
+            
+            # Generate random displacement fields
+            dx = ndimage.gaussian_filter((np.random.rand(h, w) * 2 - 1), sigma) * alpha
+            dy = ndimage.gaussian_filter((np.random.rand(h, w) * 2 - 1), sigma) * alpha
+            x, y = np.meshgrid(np.arange(w), np.arange(h))
+            indices = np.reshape(y + dy, (-1, 1)), np.reshape(x + dx, (-1, 1))
+
+            # Apply to CT/PET channels (Bilinear)
+            img_new = np.zeros_like(img)
+            for i in range(img.shape[2]):
+                img_new[..., i] = ndimage.map_coordinates(img[..., i], indices, order=1, mode='reflect').reshape(h, w)
+            
+            # Apply to Label (Nearest Neighbor)
+            lbl_new = ndimage.map_coordinates(lbl, indices, order=0, mode='reflect').reshape(h, w)
+            
+            img, lbl = img_new, lbl_new
+
+        # 4. Mild intensity jitter (image only)
         if random.random() < 0.3:
             scale = random.uniform(0.85, 1.15)
             shift = random.uniform(-0.05, 0.05)
             img   = np.clip(img * scale + shift, 0.0, 1.0)
+
         return img, lbl
 
 
@@ -280,11 +312,11 @@ class HECKTORNPZInferenceDataset(Dataset):
 
     Each __getitem__ returns:
       {
-        "images"  : (S, 2, H, W) float32 tensor — all axial slices
+        "images"  : (S, 2, H, W) float32 tensor - all axial slices
         "labels"  : (S, H, W)    int64 tensor
         "case_id" : str
-        "npz_path": str          — absolute path to NPZ (for inverse transform)
-        "orig_shape": (R, A)     — original spatial shape before resize
+        "npz_path": str          - absolute path to NPZ (for inverse transform)
+        "orig_shape": (R, A)     - original spatial shape before resize
       }
     """
 
@@ -333,7 +365,7 @@ class HECKTORNPZInferenceDataset(Dataset):
             imgs[s, :, :, 1] = resize_slice(pet_slices[s], self.size, cv2.INTER_LINEAR)
             lbls[s]          = resize_slice(lbl_slices[s], self.size, cv2.INTER_NEAREST)
 
-        # (S, H, W, 2) → (S, 2, H, W)
+        # (S, H, W, 2) -> (S, 2, H, W)
         imgs_t = torch.from_numpy(imgs).permute(0, 3, 1, 2)
         lbls_t = torch.from_numpy(lbls)
 
