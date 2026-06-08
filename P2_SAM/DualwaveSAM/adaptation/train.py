@@ -1,5 +1,5 @@
 """
-train.py  —  3-class DualwaveSAM training on HECKTOR 2026 NPZ
+train.py  -  3-class DualwaveSAM training on HECKTOR 2026 NPZ
 =============================================================
 
 Supports:
@@ -14,7 +14,7 @@ Usage (classic):
       --logdir DualwaveSAM3c_classic \\
       --max_epochs 300
 
-Usage (one fold — called by shell script loop):
+Usage (one fold - called by shell script loop):
   python {folder}/train.py \\
       --data_dir /data/ethan/PP_hecktor2026_kfold_npz \\
       --json_list dataset_swincross_2026kfold_fold2.json \\
@@ -34,8 +34,8 @@ from torch.utils.data import DataLoader
 
 # Add DualwaveSAM root (wave_encoder etc.) and this package to path
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE.parent))   # → DualwaveSAM root (sam_modeling_wave/)
-sys.path.insert(0, str(_HERE))          # → this package (dataset, model, losses, trainer, etc.)
+sys.path.insert(0, str(_HERE.parent))   # -> DualwaveSAM root (sam_modeling_wave/)
+sys.path.insert(0, str(_HERE))          # -> this package (dataset, model, losses, trainer, etc.)
 
 from dataset      import HECKTORNPZDataset
 from losses       import CombinedLoss
@@ -63,7 +63,7 @@ parser.add_argument("--checkpoint", default=None, type=str,
 # Model
 parser.add_argument("--img_size",   default=256,  type=int)
 parser.add_argument("--n_filters",  default=16,   type=int,
-                    help="WaveEncoder base filter count (default 16 → 256-ch output).")
+                    help="WaveEncoder base filter count (default 16 -> 256-ch output).")
 parser.add_argument("--wavelet",    default="haar", type=str)
 parser.add_argument("--num_classes",default=3,    type=int)
 parser.add_argument("--no_aux",     action="store_true",
@@ -87,11 +87,9 @@ parser.add_argument("--bg_ratio",   default=0.15,  type=float,
                     help="Fraction of background slices per foreground slice per epoch.")
 
 # Loss
-parser.add_argument("--alpha",    default=0.3,  type=float, help="Tversky FP weight")
-parser.add_argument("--beta",     default=0.7,  type=float, help="Tversky FN weight")
-parser.add_argument("--gamma",    default=0.75, type=float, help="Focal exponent")
-parser.add_argument("--weight_primary", default=0.8, type=float)
-parser.add_argument("--weight_aux",     default=0.2, type=float)
+parser.add_argument("--lambda1",  default=0.01, type=float, help="MAE (L1) regularizer weight")
+parser.add_argument("--lambda2",  default=0.1,  type=float, help="MSE (L2) regularizer weight")
+parser.add_argument("--gamma",    default=2.0,  type=float, help="Focal exponent")
 
 # GPU
 parser.add_argument("--gpu", default=0, type=int)
@@ -109,18 +107,18 @@ def main():
         args.device = torch.device(f"cuda:{args.gpu}")
         torch.cuda.set_device(args.device)
         torch.backends.cudnn.benchmark = True
-        print(f"✅ GPU: cuda:{args.gpu}")
+        print(f" GPU: cuda:{args.gpu}")
     else:
         args.device = torch.device("cpu")
         args.amp    = False
-        print("⚠  No GPU — CPU mode")
+        print("  No GPU - CPU mode")
 
     # ── Logdir ────────────────────────────────────────────────────────────
     args.logdir = os.path.join("./runs", args.logdir)
     os.makedirs(args.logdir, exist_ok=True)
 
     # ── Datasets ──────────────────────────────────────────────────────────
-    print("\nBuilding datasets …")
+    print("\nBuilding datasets ...")
     train_ds = HECKTORNPZDataset(
         json_path=args.json_list,
         split="training",
@@ -160,7 +158,7 @@ def main():
     print(f"Batch size: {args.batch_size} | Max epochs: {args.max_epochs}")
 
     # ── Model ─────────────────────────────────────────────────────────────
-    print("\nBuilding model …")
+    print("\nBuilding model ...")
     model = DualwaveSAM3Class(
         img_size=args.img_size,
         n_filters=args.n_filters,
@@ -171,12 +169,10 @@ def main():
 
     # ── Loss ──────────────────────────────────────────────────────────────
     loss_func = CombinedLoss(
-        alpha=args.alpha,
-        beta=args.beta,
+        lambda1=args.lambda1,
+        lambda2=args.lambda2,
         gamma=args.gamma,
         num_classes=args.num_classes,
-        weight_primary=args.weight_primary,
-        weight_aux=args.weight_aux,
     )
 
     # ── Optimizer ─────────────────────────────────────────────────────────

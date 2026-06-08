@@ -1,28 +1,28 @@
 """
-model.py  —  DualwaveSAM adapted for 3-class HECKTOR segmentation
+model.py  -  DualwaveSAM adapted for 3-class HECKTOR segmentation
 ==================================================================
 
 Design principle: preserve the original DualwaveSAM forward pass exactly.
 
 Original forward pass (sam_wave.py + sam_model.py):
   x (B,2,H,W)
-    → WaveEncoder            → image_embeddings (B, 256, h, w)
-    → PseudoMaskHead         → aux_pseudo_logits (B, 1, H, W)   [auxiliary]
-    → PromptEncoder (frozen) → sparse_emb, dense_emb
-    → MaskDecoder   (frozen) → low_res_masks (B, K, h, w)
-    → postprocess_masks      → masks (B, K, H, W)
-    → select mask slice      → final masks (B, 1, H, W)         [primary]
+    -> WaveEncoder            -> image_embeddings (B, 256, h, w)
+    -> PseudoMaskHead         -> aux_pseudo_logits (B, 1, H, W)   [auxiliary]
+    -> PromptEncoder (frozen) -> sparse_emb, dense_emb
+    -> MaskDecoder   (frozen) -> low_res_masks (B, K, h, w)
+    -> postprocess_masks      -> masks (B, K, H, W)
+    -> select mask slice      -> final masks (B, 1, H, W)         [primary]
 
 What we change for 3-class output:
-  - MaskDecoder: num_multimask_outputs 3 → 2  (so output has 3 channels:
+  - MaskDecoder: num_multimask_outputs 3 -> 2  (so output has 3 channels:
     1 iou-token mask + 2 multimask = 3 total; we keep all 3 and map them
     to bg/GTVp/GTVn via a thin 1×1 conv adaptor)
-  - PseudoMaskHead: out channels 1 → 3
-  - Add a tiny ClassAdaptor (1×1 conv, 3→3) after postprocess_masks to
+  - PseudoMaskHead: out channels 1 -> 3
+  - Add a tiny ClassAdaptor (1×1 conv, 3->3) after postprocess_masks to
     re-map the 3 raw mask channels to (bg, GTVp, GTVn) logits.
 
-Everything else — WaveEncoder, PromptEncoder, MaskDecoder internals,
-postprocess_masks, Laplacian sharpening — is UNCHANGED.
+Everything else - WaveEncoder, PromptEncoder, MaskDecoder internals,
+postprocess_masks, Laplacian sharpening - is UNCHANGED.
 
 Frozen components (as in original): PromptEncoder, MaskDecoder.
 Trainable:  WaveEncoder, PseudoMaskHead3, ClassAdaptor.
@@ -51,11 +51,11 @@ NUM_CLASSES = 3   # 0=background, 1=GTVp, 2=GTVn
 
 # MaskDecoder channel arithmetic:
 #   num_mask_tokens = num_multimask_outputs + 1  (iou-token mask + multimask)
-#   multimask_output=True  → output slice(1, None) → num_multimask_outputs channels
+#   multimask_output=True  -> output slice(1, None) -> num_multimask_outputs channels
 #
 # To get exactly NUM_CLASSES=3 output channels:
-#   num_multimask_outputs = 3  → num_mask_tokens = 4
-#   multimask_output=True      → slice(1,None) on (B,4,h,w) → (B,3,h,w)  ✓
+#   num_multimask_outputs = 3  -> num_mask_tokens = 4
+#   multimask_output=True      -> slice(1,None) on (B,4,h,w) -> (B,3,h,w)  ✓
 _NUM_MULTIMASK = NUM_CLASSES   # = 3
 
 
@@ -64,7 +64,7 @@ _NUM_MULTIMASK = NUM_CLASSES   # = 3
 class PseudoMaskHead3(nn.Module):
     """
     Identical to sam_model.PseudoMaskHead but outputs NUM_CLASSES channels.
-    Takes image_embeddings (B, 256, h, w) → (B, NUM_CLASSES, H, W) logits.
+    Takes image_embeddings (B, 256, h, w) -> (B, NUM_CLASSES, H, W) logits.
     """
 
     def __init__(self, in_ch: int = 256, mid_ch: int = 64,
@@ -91,26 +91,26 @@ class PseudoMaskHead3(nn.Module):
 
 class ClassAdaptor(nn.Module):
     """
-    1×1 conv that re-maps the 3 raw MaskDecoder output channels to
-    (background, GTVp, GTVn) logits.  This is the only new learned layer
-    inserted into the original SAM output path.
-
-    Input : (B, 3, H, W)  — postprocessed mask logits from MaskDecoder
-    Output: (B, 3, H, W)  — class logits
+    Image-Conditioned Adaptor: Takes SAM's raw masks AND the original CT/PET 
+    image to cleanly resolve boundary artifacts based on actual biological features.
     """
-
-    def __init__(self, num_classes: int = NUM_CLASSES):
+    def __init__(self, num_classes: int = NUM_CLASSES, img_channels: int = 2):
         super().__init__()
-        self.proj = nn.Conv2d(num_classes, num_classes, kernel_size=1, bias=True)
+        in_ch = num_classes + img_channels
+        
+        self.proj = nn.Sequential(
+            nn.Conv2d(in_ch, 16, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(16),
+            nn.GELU(),
+            nn.Conv2d(16, num_classes, kernel_size=3, padding=1, bias=True)
+        )
 
-        # Using Kaiming normal initialization to allow the optimizer 
-        # to freely learn the mapping from SAM's multimask outputs 
-        # to the specific biological classes.
-        nn.init.kaiming_normal_(self.proj.weight, mode='fan_out', nonlinearity='relu')
-        if self.proj.bias is not None:
-            nn.init.zeros_(self.proj.bias)
+        nn.init.kaiming_normal_(self.proj[3].weight, mode='fan_out', nonlinearity='relu')
+        nn.init.zeros_(self.proj[3].bias)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, masks: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+        # Concatenate masks and CT/PET images along the channel dimension
+        x = torch.cat([masks, image], dim=1)
         return self.proj(x)
 
 
@@ -134,12 +134,12 @@ class DualwaveSAM3Class(nn.Module):
 
     Forward pass (preserves original structure):
       x (B,2,H,W)
-        → WaveEncoder            → image_embeddings (B,256,h,w)
-        → PseudoMaskHead3        → aux_logits (B,3,H,W)      [auxiliary loss]
-        → PromptEncoder (frozen) → sparse_emb, dense_emb
-        → MaskDecoder   (frozen) → low_res_masks (B,3,h,w)   [3 = 1+2 multimask]
-        → postprocess_masks      → masks (B,3,H,W)
-        → ClassAdaptor           → logits (B,3,H,W)          [primary loss]
+        -> WaveEncoder            -> image_embeddings (B,256,h,w)
+        -> PseudoMaskHead3        -> aux_logits (B,3,H,W)      [auxiliary loss]
+        -> PromptEncoder (frozen) -> sparse_emb, dense_emb
+        -> MaskDecoder   (frozen) -> low_res_masks (B,3,h,w)   [3 = 1+2 multimask]
+        -> postprocess_masks      -> masks (B,3,H,W)
+        -> ClassAdaptor           -> logits (B,3,H,W)          [primary loss]
 
     Frozen: PromptEncoder, MaskDecoder
     Trainable: WaveEncoder, PseudoMaskHead3, ClassAdaptor
@@ -192,7 +192,7 @@ class DualwaveSAM3Class(nn.Module):
         )
 
         # ── 4. Mask decoder (FROZEN) ──────────────────────────────────────
-        # num_multimask_outputs=2 → decoder outputs 3 channels total
+        # num_multimask_outputs=2 -> decoder outputs 3 channels total
         # (1 iou-token mask + 2 multimask), matching num_classes=3
         self.mask_decoder = MaskDecoder(
             num_multimask_outputs=_NUM_MULTIMASK,
@@ -224,24 +224,28 @@ class DualwaveSAM3Class(nn.Module):
         # 1. Keep the PromptEncoder completely frozen
         for p in self.prompt_encoder.parameters():
             p.requires_grad = False
-            
-        # 2. Freeze the heavy transformer to preserve SAM's edge-awareness
-        for p in self.mask_decoder.transformer.parameters():
+        
+        # 2. Freeze the ENTIRE Mask Decoder to preserve pre-trained edge awareness
+        for p in self.mask_decoder.parameters():
             p.requires_grad = False
-            
-        # 3. UNFREEZE the final rendering layers to break the hierarchy
-        for p in self.mask_decoder.mask_tokens.parameters():
-            p.requires_grad = True
-        for p in self.mask_decoder.output_upscaling.parameters():
-            p.requires_grad = True
-        for p in self.mask_decoder.output_hypernetworks_mlps.parameters():
-            p.requires_grad = True
 
-        # 4. Freeze the IoU prediction head (we don't use it, saves memory)
-        for p in self.mask_decoder.iou_token.parameters():
-            p.requires_grad = False
-        for p in self.mask_decoder.iou_prediction_head.parameters():
-            p.requires_grad = False
+        # # 2. Freeze the heavy transformer to preserve SAM's edge-awareness
+        # for p in self.mask_decoder.transformer.parameters():
+        #     p.requires_grad = False
+            
+        # # 3. UNFREEZE the final rendering layers to break the hierarchy
+        # for p in self.mask_decoder.mask_tokens.parameters():
+        #     p.requires_grad = True
+        # for p in self.mask_decoder.output_upscaling.parameters():
+        #     p.requires_grad = True
+        # for p in self.mask_decoder.output_hypernetworks_mlps.parameters():
+        #     p.requires_grad = True
+
+        # # 4. Freeze the IoU prediction head
+        # for p in self.mask_decoder.iou_token.parameters():
+        #     p.requires_grad = False
+        # for p in self.mask_decoder.iou_prediction_head.parameters():
+        #     p.requires_grad = False
 
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         total     = sum(p.numel() for p in self.parameters())
@@ -273,11 +277,11 @@ class DualwaveSAM3Class(nn.Module):
         """
         Parameters
         ----------
-        x : (B, 2, H, W)  — channel 0 = CT, channel 1 = PET
+        x : (B, 2, H, W)  - channel 0 = CT, channel 1 = PET
 
         Returns
         -------
-        logits     : (B, num_classes, H, W)  — primary segmentation logits
+        logits     : (B, num_classes, H, W)  - primary segmentation logits
         aux_logits : (B, num_classes, H, W) | None
         """
         B, C, H, W = x.shape
@@ -294,7 +298,7 @@ class DualwaveSAM3Class(nn.Module):
                 edges      = _laplacian_edge(aux_logits)
                 aux_logits = 0.8 * aux_logits + 0.2 * edges
 
-        # ── Step 3: prompt encoder (no prompts — learned prior only) ──────
+        # ── Step 3: prompt encoder (no prompts - learned prior only) ──────
         sparse_embeddings, dense_embeddings = self.prompt_encoder(
             points=None, boxes=None, masks=None,
         )
@@ -303,7 +307,7 @@ class DualwaveSAM3Class(nn.Module):
         dense_embeddings  = dense_embeddings.expand(B, -1, -1, -1)
 
         # ── Step 4: mask decoder ──────────────────────────────────────────
-        # multimask_output=True → returns all _NUM_MULTIMASK masks
+        # multimask_output=True -> returns all _NUM_MULTIMASK masks
         # Together with the iou-token mask: total 3 channels
         low_res_masks, _ = self.mask_decoder(
             image_embeddings        = image_embeddings,
@@ -321,7 +325,7 @@ class DualwaveSAM3Class(nn.Module):
         )   # (B, 3, H, W)
 
         # ── Step 6: class adaptor ─────────────────────────────────────────
-        logits = self.class_adaptor(masks)   # (B, 3, H, W)
+        logits = self.class_adaptor(masks, x)   # (B, 3, H, W)
 
         return logits, aux_logits
 
