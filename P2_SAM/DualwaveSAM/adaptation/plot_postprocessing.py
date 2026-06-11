@@ -71,8 +71,13 @@ def generate_plots(csv_path: str, output_dir: str):
 
     # ── 1. Global Distribution of Removed Volumes ──
     fig, ax = plt.subplots(figsize=(8, 6))
-    sns.violinplot(x="Removal_Type", y="Volume_mm3", data=df_melt, palette=PALETTE, inner=None, ax=ax, alpha=0.6)
-    sns.stripplot(x="Removal_Type", y="Volume_mm3", data=df_melt, palette=PALETTE, **STRIP_KW, ax=ax)
+    
+    # 1. Define explicit order to keep plots and labels perfectly synced
+    order_vol = df_melt["Removal_Type"].unique()
+    
+    # 2. Pass 'order=order_vol' to Seaborn
+    sns.violinplot(x="Removal_Type", y="Volume_mm3", data=df_melt, palette=PALETTE, inner=None, ax=ax, alpha=0.6, order=order_vol)
+    sns.stripplot(x="Removal_Type", y="Volume_mm3", data=df_melt, palette=PALETTE, **STRIP_KW, ax=ax, order=order_vol)
     
     ax.set_title("Distribution of Removed Volumes (mm³) per Case", fontweight="bold", fontsize=13)
     ax.set_ylabel("Removed Volume (mm³)")
@@ -80,7 +85,9 @@ def generate_plots(csv_path: str, output_dir: str):
     
     # Add medians as text
     medians = df_melt.groupby("Removal_Type")["Volume_mm3"].median()
-    for i, label in enumerate(medians.index):
+    
+    # 3. Iterate over 'order_vol' instead of 'medians.index'
+    for i, label in enumerate(order_vol):
         ax.text(i, medians[label], f" Med: {medians[label]:.1f} mm³", 
                 color="black", ha="left", va="bottom", fontweight="bold", fontsize=9)
     
@@ -141,18 +148,25 @@ def generate_plots(csv_path: str, output_dir: str):
         }
         df_counts["Removal_Type"] = df_counts["Removal_Type"].map(count_map)
 
-        fig, ax = plt.subplots(figsize=(10, 6)) # Made slightly wider to fit new labels
-        sns.violinplot(x="Removal_Type", y="Count", data=df_counts, palette=PALETTE, inner=None, ax=ax, alpha=0.6)
-        sns.stripplot(x="Removal_Type", y="Count", data=df_counts, palette=PALETTE, **STRIP_KW, ax=ax)
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # 1. Define explicit order for counts
+        order_cnt = df_counts["Removal_Type"].unique()
+        
+        # 2. Pass 'order=order_cnt' to Seaborn
+        sns.violinplot(x="Removal_Type", y="Count", data=df_counts, palette=PALETTE, inner=None, ax=ax, alpha=0.6, order=order_cnt)
+        sns.stripplot(x="Removal_Type", y="Count", data=df_counts, palette=PALETTE, **STRIP_KW, ax=ax, order=order_cnt)
 
         ax.set_title("Number of Artifacts Removed per Case", fontweight="bold", fontsize=13)
         ax.set_ylabel("Count of Removed Components")
         ax.set_xlabel("")
-        plt.xticks(rotation=30, ha="right") # Rotate labels so they don't overlap
+        plt.xticks(rotation=30, ha="right")
 
         # Add medians as text
         medians_cnt = df_counts.groupby("Removal_Type")["Count"].median()
-        for i, label in enumerate(df_counts["Removal_Type"].unique()):
+        
+        # 3. Iterate over your explicit order
+        for i, label in enumerate(order_cnt):
             ax.text(i, medians_cnt[label], f" Med: {medians_cnt[label]:.0f}",
                     color="black", ha="left", va="bottom", fontweight="bold", fontsize=9)
 
