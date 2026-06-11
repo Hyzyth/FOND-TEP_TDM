@@ -18,7 +18,7 @@ JSON_FILE="dataset_temporal.json"
 
 # Set this to the best model directory and weights from your DualWave training
 MODEL_DIR="DualwaveSAM3c_classic_500ep"
-WEIGHTS="model_best.pth"
+WEIGHTS="model_last.pth"
 TARGET_NAME="temporal_zeroshot_vault"
 
 # Paths to the reused SwinCross evaluation scripts

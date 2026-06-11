@@ -53,7 +53,7 @@ NUM_CLASSES=3
 TEST_MODEL_DIR="DualwaveSAM3c_test"
 TEST_WEIGHTS="model_last.pth"
 CLASSIC_MODEL_DIR="DualwaveSAM3c_classic_500ep"
-CLASSIC_WEIGHTS="model_best.pth"
+CLASSIC_WEIGHTS="model_last.pth"
 
 # ── 6. K-Fold Setup ────────────────────────────────────────────────────────
 KFOLD_BASE_DIR="DualwaveSAM3c_kfold_100ep"
