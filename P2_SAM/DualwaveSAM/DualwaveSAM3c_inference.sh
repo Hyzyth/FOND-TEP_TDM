@@ -27,9 +27,9 @@ SKIP_CLASSIC_TEST=false
 SKIP_CLASSIC_TRAIN=false
 SKIP_CLASSIC_VAL=false
 
-SKIP_KFOLD_TEST=false
-SKIP_KFOLD_TRAIN=false
-SKIP_KFOLD_VAL=false
+SKIP_KFOLD_TEST=true
+SKIP_KFOLD_TRAIN=true
+SKIP_KFOLD_VAL=true
 
 # ── 2. Hardware & Inference Parameters ────────────────────────────────────
 GPU=0
@@ -52,11 +52,11 @@ NUM_CLASSES=3
 # ── 5. Classic Model Setup ─────────────────────────────────────────────────
 TEST_MODEL_DIR="DualwaveSAM3c_test"
 TEST_WEIGHTS="model_last.pth"
-CLASSIC_MODEL_DIR="DualwaveSAM3c_classic_325ep"
+CLASSIC_MODEL_DIR="DualwaveSAM3c_classic_500ep"
 CLASSIC_WEIGHTS="model_best.pth"
 
 # ── 6. K-Fold Setup ────────────────────────────────────────────────────────
-KFOLD_BASE_DIR="DualwaveSAM3c_kfold_65ep"
+KFOLD_BASE_DIR="DualwaveSAM3c_kfold_100ep"
 K_FOLDS=5
 
 # ── 7. SwinCross evaluation scripts (reused as-is) ─────────────────────────
@@ -95,7 +95,7 @@ run_test_inference() {
     local OUT_DIR="/data/ethan/DualwaveSAM3c/${TEST_MODEL_DIR}/${TARGET_NAME}"
     mkdir -p "$OUT_DIR"
 
-    echo " [1/3] Inference with ${TEST_MODEL_DIR}/${TEST_WEIGHTS}"
+    echo " [1/4] Inference with ${TEST_MODEL_DIR}/${TEST_WEIGHTS}"
     CUDA_VISIBLE_DEVICES=$GPU python3.12 adaptation/infer.py \
         --data_dir    "$DATA_DIR" \
         --json_list   "$JSON_FILE" \
@@ -111,16 +111,21 @@ run_test_inference() {
         --skip_existing \
         2>&1 | tee "$OUT_DIR/inference.log"
     
-    echo " [2/3] Evaluation"
+    echo " [2/4] Evaluation"
     python3.12 "$EVAL_SCRIPT" \
         --data_dir   "$DATA_DIR" \
         --json_list  "$JSON_FILE" \
         --output_dir "$OUT_DIR" \
         2>&1 | tee "$OUT_DIR/evaluation.log"
     
-    echo " [3/3] Plotting metrics"
+    echo " [3/4] Plotting metrics"
     python3.12 "$PLOT_METRICS_SCRIPT" \
         --csv_path   "$OUT_DIR/per_case_evaluation_rich.csv" \
+        --output_dir "$OUT_DIR/plots"
+    
+    echo " [4/4] Plotting Post-Processing Analytics"
+    python3.12 adaptation/plot_postprocessing.py \
+        --csv_path   "$OUT_DIR/postprocessing_logs.csv" \
         --output_dir "$OUT_DIR/plots"
     
     echo " Complete."
@@ -140,7 +145,7 @@ run_single_inference() {
     local OUT_DIR="/data/ethan/DualwaveSAM3c/${CLASSIC_MODEL_DIR}/${TARGET_NAME}"
     mkdir -p "$OUT_DIR"
 
-    echo " [1/3] Inference with ${CLASSIC_MODEL_DIR}/${CLASSIC_WEIGHTS}"
+    echo " [1/4] Inference with ${CLASSIC_MODEL_DIR}/${CLASSIC_WEIGHTS}"
     CUDA_VISIBLE_DEVICES=$GPU python3.12 adaptation/infer.py \
         --data_dir    "$DATA_DIR" \
         --json_list   "$JSON_FILE" \
@@ -156,16 +161,21 @@ run_single_inference() {
         --skip_existing \
         2>&1 | tee "$OUT_DIR/inference.log"
 
-    echo " [2/3] Evaluation"
+    echo " [2/4] Evaluation"
     python3.12 "$EVAL_SCRIPT" \
         --data_dir   "$DATA_DIR" \
         --json_list  "$JSON_FILE" \
         --output_dir "$OUT_DIR" \
         2>&1 | tee "$OUT_DIR/evaluation.log"
 
-    echo " [3/3] Plotting metrics"
+    echo " [3/4] Plotting metrics"
     python3.12 "$PLOT_METRICS_SCRIPT" \
         --csv_path   "$OUT_DIR/per_case_evaluation_rich.csv" \
+        --output_dir "$OUT_DIR/plots"
+    
+    echo " [4/4] Plotting Post-Processing Analytics"
+    python3.12 adaptation/plot_postprocessing.py \
+        --csv_path   "$OUT_DIR/postprocessing_logs.csv" \
         --output_dir "$OUT_DIR/plots"
 
     echo " Complete."

@@ -30,6 +30,8 @@ import cv2
 import numpy as np
 import SimpleITK as sitk
 import torch
+import csv
+from scipy import ndimage
 from monai.transforms import RemoveSmallObjects
 from skimage.segmentation import clear_border
 
@@ -44,28 +46,114 @@ from dataset import (
 from model import DualwaveSAM3Class
 
 # ── Post-processing thresholds ────────────────────
-_SMALL_OBJ_THRESHOLD_MM3 = 125.0
+class_thresholds = {
+            1: 100.0,  # GTVp (Tumors)
+            2: 50.0    # GTVn (Nodules)
+        }  # These thresholds are in mm³ and will be converted to voxel counts dynamically per case
 
 
-def _remove_border_objects(pred: np.ndarray) -> np.ndarray:
+def _remove_border_objects_tracked(pred: np.ndarray, spacing_mm: tuple) -> tuple:
+    """
+    Removes objects touching the volume border and tracks the volume and count removed per class.
+    """
     out = np.zeros_like(pred)
-    for cls in np.unique(pred):
-        if cls == 0:
-            continue
-        out[clear_border(pred == cls)] = cls
-    return out
-
-
-def _remove_small_objects(pred: np.ndarray, spacing_mm: tuple) -> np.ndarray:
+    border_vols = {1: 0.0, 2: 0.0}
+    border_counts = {1: 0, 2: 0}
+    
+    struct = ndimage.generate_binary_structure(3, 3)
     vox_vol = spacing_mm[0] * spacing_mm[1] * spacing_mm[2]
-    min_vox = max(1, math.ceil(_SMALL_OBJ_THRESHOLD_MM3 / vox_vol))
-    remover = RemoveSmallObjects(min_size=min_vox, connectivity=3)
-    out = pred.copy()
+
     for cls in (1, 2):
+        if not (pred == cls).any():
+            continue
+            
+        mask = (pred == cls)
+        cleared = clear_border(mask)
+        out[cleared] = cls
+
+        # Find exactly what was deleted
+        deleted_mask = mask & (~cleared)
+        
+        border_vols[cls] = float(deleted_mask.sum() * vox_vol)
+        _, count = ndimage.label(deleted_mask, structure=struct)
+        border_counts[cls] = count
+
+    return out, border_vols[1], border_vols[2], border_counts[1], border_counts[2]
+
+def _remove_nodule_shell(pred: np.ndarray, spacing_mm: tuple, iterations: int = 2) -> tuple:
+    """
+    Surgically removes GTVp (tumor) pixels that form a shell around GTVn (nodules).
+    Returns the cleaned prediction, the volume of the shell removed (mm³), 
+    and the COUNT of disconnected shell fragments removed.
+    """
+    out = pred.copy()
+    nodule_mask = (out == 2)
+    tumor_mask = (out == 1)
+
+    if not nodule_mask.any() or not tumor_mask.any():
+        return out, 0.0, 0
+
+    # 3D dilation of the nodule using 26-connectivity
+    struct = ndimage.generate_binary_structure(3, 3)
+    dilated_nodule = ndimage.binary_dilation(nodule_mask, structure=struct, iterations=iterations)
+
+    # Find where the dilated nodule overlaps with the tumor (the shell)
+    shell_mask = dilated_nodule & tumor_mask
+    
+    # Erase the shell from the output
+    out[shell_mask] = 0
+
+    # Calculate physical volume
+    vox_vol = spacing_mm[0] * spacing_mm[1] * spacing_mm[2]
+    shell_vol_mm3 = float(shell_mask.sum() * vox_vol)
+
+    # Count how many disconnected shell fragments were deleted
+    _, shell_count = ndimage.label(shell_mask, structure=struct)
+
+    return out, shell_vol_mm3, shell_count
+
+def _remove_small_objects_tracked(pred: np.ndarray, spacing_mm: tuple, thresholds_mm3: dict) -> tuple:
+    """
+    Removes small connected components using class-specific volume thresholds (in mm³),
+    and tracks the volume removed per class and count of objects removed per class.
+    
+    thresholds_mm3 expected format: {1: 100.0, 2: 50.0}
+    """
+    vox_vol = spacing_mm[0] * spacing_mm[1] * spacing_mm[2]
+    out = pred.copy()
+    removed_vols = {1: 0.0, 2: 0.0}
+    removed_counts = {1: 0, 2: 0}
+
+    # 3D connectivity structure for counting objects
+    struct = ndimage.generate_binary_structure(3, 3)
+
+    for cls, thresh_mm3 in thresholds_mm3.items():
+        if not (pred == cls).any():
+            continue
+            
+        # Calculate minimum voxels dynamically for this specific class
+        min_vox = max(1, math.ceil(thresh_mm3 / vox_vol))
+        remover = RemoveSmallObjects(min_size=min_vox, connectivity=3)
+        
         binary = torch.from_numpy((pred == cls).astype(np.uint8)[None])
-        filt   = remover(binary).numpy()[0]
-        out[(out == cls) & (filt == 0)] = 0
-    return out
+        filt = remover(binary).numpy()[0]
+        
+        # Identify exactly what was deleted
+        deleted_mask = (out == cls) & (filt == 0)
+        removed_vols[cls] = float(deleted_mask.sum() * vox_vol)
+
+        # Count connected components removed
+        _, num_removed = ndimage.label(deleted_mask, structure=struct)
+        removed_counts[cls] = num_removed
+        
+        # Apply the deletion to the output mask
+        out[deleted_mask] = 0
+
+    return (
+        out, 
+        removed_vols.get(1, 0.0), removed_vols.get(2, 0.0), 
+        removed_counts.get(1, 0), removed_counts.get(2, 0)
+    )
 
 
 # ── Inverse transform ─────────────────────
@@ -225,6 +313,22 @@ def main():
             entries += js.get(key, [])
     print(f"Cases to infer: {len(entries)} (split='{args.split}')")
 
+    # ── CSV logging for post-processing volumes removed ───────────────────
+    csv_log_path = os.path.join(args.output_dir, "postprocessing_logs.csv")
+    csv_headers = [
+        "case_id", "patient", "timepoint", "study_date", 
+        "border_removed_GTVp_mm3", "border_removed_GTVn_mm3",
+        "shell_removed_GTVp_mm3", 
+        "small_obj_removed_GTVp_mm3", "small_obj_removed_GTVn_mm3",
+        "border_removed_GTVp_count", "border_removed_GTVn_count",
+        "shell_removed_GTVp_count", 
+        "small_obj_removed_GTVp_count", "small_obj_removed_GTVn_count",
+        "total_removed_GTVp_count", "total_removed_GTVn_count"
+    ]
+    with open(csv_log_path, mode='w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(csv_headers)
+
     # ── Inference loop ────────────────────────────────────────────────────
     for idx, entry in enumerate(entries):
         torch.cuda.empty_cache()
@@ -236,11 +340,11 @@ def main():
         out_path = os.path.join(args.output_dir, f"{case_id}_Pred.nii.gz")
 
         if args.skip_existing and os.path.exists(out_path):
-            print(f"⏭  [{idx+1}/{len(entries)}] Skip {case_id}")
+            print(f">>  [{idx+1}/{len(entries)}] Skip {case_id}")
             continue
 
         if not os.path.exists(npz_path):
-            print(f"❌ [{idx+1}/{len(entries)}] NPZ not found: {npz_path}")
+            print(f" [{idx+1}/{len(entries)}] NPZ not found: {npz_path}")
             continue
 
         print(f"->  [{idx+1}/{len(entries)}] {case_id}")
@@ -253,8 +357,41 @@ def main():
         ras_spacing = get_ras_spacing(npz_data)
 
         # ── 2. Post-processing ────────────────────────────────────────────
-        pred_crop = _remove_border_objects(pred_crop)
-        pred_crop = _remove_small_objects(pred_crop, spacing_mm=ras_spacing)
+        # A. Remove border-touching objects
+        pred_crop, border_vol_p, border_vol_n, border_count_p, border_count_n = _remove_border_objects_tracked(
+            pred_crop, spacing_mm=ras_spacing
+        )
+
+        # B. Remove shell around nodules (GTVp only)
+        pred_crop, shell_vol_p, shell_count_p = _remove_nodule_shell(
+            pred_crop, spacing_mm=ras_spacing, iterations=2
+        )
+        
+        # C. Remove small components
+        pred_crop, small_vol_p, small_vol_n, small_count_p, small_count_n = _remove_small_objects_tracked(
+            pred_crop, spacing_mm=ras_spacing, thresholds_mm3=class_thresholds
+        )
+
+        # Calculate Grand Totals
+        total_count_p = border_count_p + shell_count_p + small_count_p
+        total_count_n = border_count_n + small_count_n
+
+        # D. Log the modifications
+        with open(csv_log_path, mode='a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                case_id,
+                entry.get("patient", ""),
+                entry.get("timepoint", ""),
+                entry.get("study_date", ""),
+                round(border_vol_p, 2), round(border_vol_n, 2),
+                round(shell_vol_p, 2),
+                round(small_vol_p, 2), round(small_vol_n, 2),
+                border_count_p, border_count_n,
+                shell_count_p,
+                small_count_p, small_count_n,
+                total_count_p, total_count_n
+            ])
 
         # ── 3. Inverse transform -> original CT space ─────────────────────
         pred_sitk = inverse_transform(pred_crop, npz_data, ras_spacing)
@@ -263,7 +400,7 @@ def main():
         labels_found = np.unique(
             sitk.GetArrayFromImage(pred_sitk)
         ).tolist()
-        print(f"   ✅ {out_path}  labels={labels_found}")
+        print(f"   {out_path}  labels={labels_found}")
 
     print("\nInference complete.")
 
