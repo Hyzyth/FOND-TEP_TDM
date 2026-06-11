@@ -111,7 +111,19 @@ class ClassAdaptor(nn.Module):
     def forward(self, masks: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
         # Concatenate masks and CT/PET images along the channel dimension
         x = torch.cat([masks, image], dim=1)
-        return self.proj(x)
+        logits = self.proj(x)
+        
+        # Only apply the air mask penalty during validation/inference!
+        # During training, we don't want to artificially explode the Cross Entropy 
+        # loss if a ground truth tumor pixel slightly overlaps with the air threshold.
+        if not self.training:
+            ct_image = image[:, 0:1, :, :]
+            air_mask = (ct_image <= 1e-4).float()
+            
+            # A penalty of 15.0 is mathematically safe and drives the probability to ~0
+            logits[:, 1:, :, :] = logits[:, 1:, :, :] - (air_mask * 15.0)
+            
+        return logits
 
 
 # ── Laplacian sharpening (verbatim from sam_model.py) ─────────────────────────
@@ -225,27 +237,27 @@ class DualwaveSAM3Class(nn.Module):
         for p in self.prompt_encoder.parameters():
             p.requires_grad = False
         
-        # 2. Freeze the ENTIRE Mask Decoder to preserve pre-trained edge awareness
-        for p in self.mask_decoder.parameters():
+        # # 2. Freeze the ENTIRE Mask Decoder to preserve pre-trained edge awareness
+        # for p in self.mask_decoder.parameters():
+        #     p.requires_grad = False
+
+        # 2. Freeze the heavy transformer to preserve SAM's edge-awareness
+        for p in self.mask_decoder.transformer.parameters():
             p.requires_grad = False
-
-        # # 2. Freeze the heavy transformer to preserve SAM's edge-awareness
-        # for p in self.mask_decoder.transformer.parameters():
-        #     p.requires_grad = False
             
-        # # 3. UNFREEZE the final rendering layers to break the hierarchy
-        # for p in self.mask_decoder.mask_tokens.parameters():
-        #     p.requires_grad = True
-        # for p in self.mask_decoder.output_upscaling.parameters():
-        #     p.requires_grad = True
-        # for p in self.mask_decoder.output_hypernetworks_mlps.parameters():
-        #     p.requires_grad = True
+        # 3. UNFREEZE the final rendering layers to break the hierarchy
+        for p in self.mask_decoder.mask_tokens.parameters():
+            p.requires_grad = True
+        for p in self.mask_decoder.output_upscaling.parameters():
+            p.requires_grad = True
+        for p in self.mask_decoder.output_hypernetworks_mlps.parameters():
+            p.requires_grad = True
 
-        # # 4. Freeze the IoU prediction head
-        # for p in self.mask_decoder.iou_token.parameters():
-        #     p.requires_grad = False
-        # for p in self.mask_decoder.iou_prediction_head.parameters():
-        #     p.requires_grad = False
+        # 4. Freeze the IoU prediction head
+        for p in self.mask_decoder.iou_token.parameters():
+            p.requires_grad = False
+        for p in self.mask_decoder.iou_prediction_head.parameters():
+            p.requires_grad = False
 
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         total     = sum(p.numel() for p in self.parameters())

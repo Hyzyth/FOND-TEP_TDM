@@ -32,9 +32,9 @@ BATCH_SIZE=48           # 2D slices - can be much larger than 3D patch batches
 VAL_EVERY=1             # Validate every N epochs
 WARMUP_CLASSIC=10
 WARMUP_KFOLD=3
-LRATE=5e-5
+LRATE=1e-4
 
-EPOCH_NUMBER_CLASSIC=300
+EPOCH_NUMBER_CLASSIC=500
 K_FOLDS=5
 KFOLD_START=0
 # Scale kfold epochs to keep total GPU time comparable to classic run

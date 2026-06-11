@@ -171,7 +171,7 @@ def run_training(
         
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        print(f"[{ts}] Init | Dice={init_dice:.4f} | Loss={init_loss:.4f} | BG={bg_d:.4f} | Tumor={tumor_d:.4f} | Nodule={nodule_d:.4f}\n", flush=True)
+        print(f"[{ts}] Init | Dice={init_dice:.4f} | Loss={init_loss:.4f} | BG={bg_d:.4f} | Tumor={tumor_d:.4f} | Nodule={nodule_d:.4f}", flush=True)
         if writer:
             writer.add_scalar("val/dice", init_dice, 0)
             writer.add_scalar("val/loss", init_loss, 0)
@@ -188,7 +188,7 @@ def run_training(
         steps = 0
         t0 = time.time()
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{ts}] Epoch [{epoch+1}/{args.max_epochs}] starting.", flush=True)
+        print(f"\n[{ts}] Epoch [{epoch+1}/{args.max_epochs}] starting.", flush=True)
 
         for batch in train_loader:
             steps += 1
@@ -281,7 +281,7 @@ def run_training(
                 f"[{ts}] Val Dice={mean_dice:.4f} (Best={best_acc:.4f}) | "
                 f"1-Dice={one_minus_dice:.4f} | Loss={val_loss:.4f}\n"
                 f"      -> Per-Class: BG={bg_d:.4f} | Tumor={tumor_d:.4f} | Nodule={nodule_d:.4f}\n"
-                f"      -> Val time={val_dur:.1f}s | Elapsed={_fmt_time(elapsed)}\n",
+                f"      -> Val time={val_dur:.1f}s | Elapsed={_fmt_time(elapsed)}",
                 flush=True,
             )
 

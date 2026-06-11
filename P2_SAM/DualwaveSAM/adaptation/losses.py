@@ -38,10 +38,11 @@ def dice_loss_multiclass(
     probs: torch.Tensor,     # (B, C, H, W) softmax probabilities
     targets_oh: torch.Tensor,# (B, C, H, W) one-hot encoded targets
     smooth: float = 1e-5,
-    ignore_bg: bool = True
+    ignore_bg: bool = True,
+    class_weights: list = None  # Added weighting parameter
 ) -> torch.Tensor:
     """
-    Standard multi-class Dice loss. Equivalent to Tversky with alpha=0.5, beta=0.5.
+    Standard multi-class Dice loss.
     """
     dims = (0, 2, 3)  # Reduce over batch and spatial dims
     
@@ -54,6 +55,12 @@ def dice_loss_multiclass(
 
     if ignore_bg:
         dice_loss_per_class = dice_loss_per_class[1:]  # Drop class 0 (background)
+        
+        # Apply class weighting if provided (e.g., [0.25, 0.75])
+        if class_weights is not None:
+            weights = torch.tensor(class_weights, device=dice_loss_per_class.device)
+            weights = weights / weights.sum() # Normalize weights
+            return (dice_loss_per_class * weights).sum()
 
     return dice_loss_per_class.mean()
 
@@ -117,19 +124,35 @@ class CombinedLoss(nn.Module):
         targets: torch.Tensor,          # (B, H, W)
         aux_logits: torch.Tensor = None # (B, C, H, W) - Tiny Pseudo Decoder
     ) -> torch.Tensor:
+        
+        # Ensure targets are int64 for PyTorch cross_entropy
+        targets = targets.long()
 
         # 1. Prepare representations
         probs = F.softmax(logits, dim=1)
         targets_oh = one_hot_2d(targets, self.num_classes).to(logits.device)
 
         # 2. Main Loss Components (Dice + Focal)
-        dice_main = dice_loss_multiclass(probs, targets_oh, self.smooth, self.ignore_bg)
+        # Apply class weighting: 0.4 to Tumor, 0.6 to Nodule
+        dice_main = dice_loss_multiclass(probs, targets_oh, self.smooth, self.ignore_bg, class_weights=[0.4, 0.6])
         focal_main = focal_loss_categorical(logits, targets, self.gamma, self.ignore_bg)
 
         # 3. Regularization Components (MAE + MSE)
-        # The paper calculates this between the continuous prediction and one-hot ground truth
-        mae_loss = F.l1_loss(probs, targets_oh)
-        mse_loss = F.mse_loss(probs, targets_oh)
+        if self.ignore_bg:
+            # Create a spatial mask for foreground pixels
+            bg_mask = (targets != 0).float().unsqueeze(1) # (B, 1, H, W)
+            
+            # Compute pixel-wise absolute and squared errors
+            l1_pixel = torch.abs(probs - targets_oh)
+            mse_pixel = (probs - targets_oh) ** 2
+            
+            # Average ONLY over the foreground pixels to prevent background dilution
+            # Adding 1e-5 prevents division by zero if a batch has no foreground
+            mae_loss = (l1_pixel * bg_mask).sum() / (bg_mask.sum() * self.num_classes + 1e-5)
+            mse_loss = (mse_pixel * bg_mask).sum() / (bg_mask.sum() * self.num_classes + 1e-5)
+        else:
+            mae_loss = F.l1_loss(probs, targets_oh)
+            mse_loss = F.mse_loss(probs, targets_oh)
 
         # 4. Assemble Main Loss
         L_main = dice_main + focal_main + (self.lambda1 * mae_loss) + (self.lambda2 * mse_loss)
@@ -138,11 +161,11 @@ class CombinedLoss(nn.Module):
         L_total = L_main
         if aux_logits is not None:
             aux_probs = F.softmax(aux_logits, dim=1)
-            dice_aux  = dice_loss_multiclass(aux_probs, targets_oh, self.smooth, self.ignore_bg)
+            # Apply the same class weights to the auxiliary head
+            dice_aux  = dice_loss_multiclass(aux_probs, targets_oh, self.smooth, self.ignore_bg, class_weights=[0.4, 0.6])
             focal_aux = focal_loss_categorical(aux_logits, targets, self.gamma, self.ignore_bg)
             L_aux     = dice_aux + focal_aux
             
-            # The paper states L_total = L_main + L_aux (direct sum, no 0.8/0.2 split)
             L_total = L_main + L_aux
 
         return L_total

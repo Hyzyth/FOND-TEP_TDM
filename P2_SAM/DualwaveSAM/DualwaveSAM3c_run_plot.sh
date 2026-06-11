@@ -30,10 +30,13 @@ else
 fi
 
 # ── 2. Configuration ──────────────────────────────────────────────────────
+NUM_EPOCHS=500  # For plot titles - adjust if needed
+K_FOLDS=5       # For plot titles - adjust if needed
+KFOLD_EPOCHS=$(($NUM_EPOCHS / $K_FOLDS))   # For plot titles - adjust if needed
 # Match these to your training script settings
 #TEST_DIR="./runs/DualwaveSAM3c_test"
-CLASSIC_DIR="./runs/DualwaveSAM3c_classic_325ep"
-KFOLD_BASE="./runs/DualwaveSAM3c_kfold_65ep"
+CLASSIC_DIR="./runs/DualwaveSAM3c_classic_${NUM_EPOCHS}ep"
+KFOLD_BASE="./runs/DualwaveSAM3c_kfold_${KFOLD_EPOCHS}ep"
 
 # ── 3.0 Test run plot (optional) ──────────────────────────────────────────
 # if [ -d "$TEST_DIR" ]; then
@@ -54,7 +57,7 @@ if [ -d "$CLASSIC_DIR" ]; then
     python3.12 adaptation/plot_training.py \
         --log_dirs  "$CLASSIC_DIR" \
         --output_dir "$CLASSIC_DIR/plots" \
-        --title "DualwaveSAM 3-class Classic (325 Epochs)"
+        --title "DualwaveSAM 3-class Classic ($NUM_EPOCHS Epochs)"
 else
     echo "[SKIP] Classic directory not found: $CLASSIC_DIR"
 fi

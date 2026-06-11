@@ -52,7 +52,7 @@ def parse_logs(log_directory: str):
     
     # Validation per-class metrics
     per_class_pat = re.compile(
-        r"↳ Per-Class:\s*BG=([0-9.]+)\s*\|\s*Tumor=([0-9.]+)\s*\|\s*Nodule=([0-9.]+)"
+        r"(?:->|↳)\s*Per-Class:\s*BG=([0-9.]+)\s*\|\s*Tumor=([0-9.]+)\s*\|\s*Nodule=([0-9.]+)"
     )
     
     # Epoch 0 (Init) single-line marker
