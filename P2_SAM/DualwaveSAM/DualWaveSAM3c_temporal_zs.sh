@@ -77,9 +77,9 @@ generate_temporal_sub_reports() {
 }
 
 # ── 4. Execution ───────────────────────────────────────────────────────────
-echo "╔════════════════════════════════════════════════════════════╗"
-echo "║ ZERO-SHOT INFERENCE : TempoRAL Dataset"
-echo "╚════════════════════════════════════════════════════════════╝"
+echo "╔═════════════════════════════════════════╗"
+echo "║ ZERO-SHOT INFERENCE : TempoRAL Dataset" ║
+echo "╚═════════════════════════════════════════╝"
 
 # 1. Inference
 echo " [1/5] Running Inference..."

@@ -23,7 +23,7 @@ RUN_TEST=false
 RUN_CLASSIC_TRAIN=true
 RUN_CLASSIC_RESUME=false
 
-RUN_KFOLD_TRAIN=true
+RUN_KFOLD_TRAIN=false
 RUN_KFOLD_PRODUCTION_FULL=false   # Train on 100% of pool (no held-out val)
 
 # ── 2. Hardware & Hyperparameters ──────────────────────────────────────────
