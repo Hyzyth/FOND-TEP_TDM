@@ -133,7 +133,7 @@ def run_training(
         init_mean_acc = acc_func.aggregate().item()
 
         # Calculate mean across the dataset (dim=0), resulting in shape (num_classes,)
-        init_per_class = per_class_acc_func.aggregate().mean(dim=0).cpu().numpy()
+        init_per_class = per_class_acc_func.aggregate().nanmean(dim=0).cpu().numpy()
         bg_d     = init_per_class[0] if len(init_per_class) > 0 else 0.0
         tumor_d  = init_per_class[1] if len(init_per_class) > 1 else 0.0
         nodule_d = init_per_class[2] if len(init_per_class) > 2 else 0.0
@@ -272,7 +272,7 @@ def run_training(
 
             mean_acc      = acc_func.aggregate().item()
 
-            per_class = per_class_acc_func.aggregate().mean(dim=0).cpu().numpy()
+            per_class = per_class_acc_func.aggregate().nanmean(dim=0).cpu().numpy()
             bg_d     = per_class[0] if len(per_class) > 0 else 0.0
             tumor_d  = per_class[1] if len(per_class) > 1 else 0.0
             nodule_d = per_class[2] if len(per_class) > 2 else 0.0
