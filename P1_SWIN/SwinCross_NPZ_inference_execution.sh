@@ -22,30 +22,30 @@ SKIP_CLASSIC_TEST=false
 SKIP_CLASSIC_TRAIN=false
 SKIP_CLASSIC_VAL=false
 
-SKIP_KFOLD_TEST=false
-SKIP_KFOLD_TRAIN=false
-SKIP_KFOLD_VAL=false
+SKIP_KFOLD_TEST=true
+SKIP_KFOLD_TRAIN=true
+SKIP_KFOLD_VAL=true
 
 SKIP_TEMPORAL_CLASSIC=false
-SKIP_TEMPORAL_KFOLD=false
+SKIP_TEMPORAL_KFOLD=true
 
 # ── 2. Hardware & Parameters ───────────────────────────────────────────────
 GPU=0
-INFER_OVERLAP=0.5   # 0.5 for speed, 0.7 for max quality
+INFER_OVERLAP=0.7   # 0.5 for speed, 0.7 for max quality
 SW_BATCH=4
 
 # ── 3. Data Paths & JSONs ──────────────────────────────────────────────────
 HECKTOR_DATA="/data/ethan/PP_hecktor2026_kfold_npz"
-TEMPORAL_DATA="/data/ethan/PP_temporal_swincross_npz"
+TEMPORAL_DATA="/data/ethan/PP_temporal_npz"
 
 JSON_TEST="dataset_swincross_2026kfold_test.json"
 JSON_TRAIN="dataset_swincross_2026kfold_classic_train.json"
 JSON_VAL="dataset_swincross_2026kfold_classic_val.json"
-JSON_TEMPORAL="dataset_swincross_temporal.json"
+JSON_TEMPORAL="dataset_temporal.json"
 
 # ── 4. Model Setup ─────────────────────────────────────────────────────────
 # Classic Mode 
-CLASSIC_MODEL_DIR="HECKTOR_run_1000_epoch"
+CLASSIC_MODEL_DIR="HECKTOR_run_1500_epoch"
 CLASSIC_WEIGHTS="model_best.pth"
 
 # K-Fold Mode
@@ -98,10 +98,16 @@ run_single_inference() {
         --output_dir "$OUT_DIR" \
         2>&1 | tee "$OUT_DIR/evaluation.log"
 
-    echo " [3/3] Generating Plots"
-    python3.12 plot_metrics.py \
+    echo " [3/3] Generating Metrics & Post-Processing Plots"
+    python3.12 npz_version/plot_metrics.py \
         --csv_path "$OUT_DIR/per_case_evaluation_rich.csv" \
         --output_dir "$OUT_DIR/plots"
+    
+    if [ -f "$OUT_DIR/postprocessing_logs.csv" ]; then
+        python3.12 npz_version/plot_postprocessing.py \
+            --csv_path "$OUT_DIR/postprocessing_logs.csv" \
+            --output_dir "$OUT_DIR/plots"
+    fi
     echo " Complete."
 }
 
@@ -138,6 +144,13 @@ run_kfold_ensemble() {
             --roi_x 96 --roi_y 96 --roi_z 96 \
             --workers 2 --sw_batch_size $SW_BATCH --skip_existing \
             2>&1 | tee "$FOLD_OUT/inference.log"
+        
+        # Generate post-processing plots for this specific fold if the log exists
+        if [ -f "$FOLD_OUT/postprocessing_logs.csv" ]; then
+            python3.12 npz_version/plot_postprocessing.py \
+                --csv_path "$FOLD_OUT/postprocessing_logs.csv" \
+                --output_dir "$FOLD_OUT/plots" > /dev/null 2>&1
+        fi
     done
 
     # 2. Ensemble majority vote
@@ -159,9 +172,16 @@ run_kfold_ensemble() {
     
     # 4. Plot Ensemble Metrics
     echo " [4/4] Generating Ensemble Plots."
-    python3.12 plot_metrics.py \
+    python3.12 npz_version/plot_metrics.py \
         --csv_path "$ENSEMBLE_OUT/per_case_evaluation_rich.csv" \
         --output_dir "$ENSEMBLE_OUT/plots"
+    
+    # If the ensemble script generates its own post-processing logs, plot them
+    if [ -f "$ENSEMBLE_OUT/postprocessing_logs.csv" ]; then
+        python3.12 npz_version/plot_postprocessing.py \
+            --csv_path "$ENSEMBLE_OUT/postprocessing_logs.csv" \
+            --output_dir "$ENSEMBLE_OUT/plots"
+    fi
     echo " Complete."
 }
 
@@ -188,9 +208,8 @@ generate_temporal_sub_reports() {
                 local N=$(tail -n+2 "$SUB_CSV" | wc -l)
                 echo "  ↳ $tp: $N cases → $SUB_CSV"
                 
-                # We pipe plotting output to /dev/null to avoid cluttering the terminal, 
-                # but you can remove the pipe if you want full verbosity.
-                python3.12 plot_metrics.py \
+                # We pipe plotting output to /dev/null to avoid cluttering the terminal
+                python3.12 npz_version/plot_metrics.py \
                     --csv_path   "$SUB_CSV" \
                     --output_dir "$TARGET_DIR/plots_${tp}" > /dev/null 2>&1
             done

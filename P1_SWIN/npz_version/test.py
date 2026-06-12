@@ -6,14 +6,6 @@
 test.py  —  SwinCross inference on NPZ-preprocessed data
 ==========================================================
 
-Key changes vs. original:
-  - Loads directly from NPZ (no MONAI Invertd, no MetaTensor tracking needed).
-  - Inverse transform (uncrop → un-resample → original CT space) is done
-    explicitly with SimpleITK using metadata stored in the NPZ at preprocess time.
-  - FP16 autocast is always applied during inference (independent of --noamp).
-  - Optional torch.compile for the model (--compile flag).
-  - Post-processing (border removal, small-object removal) unchanged.
-
 Entry point: iterate the JSON list, load each NPZ, run sliding-window
 inference, invert to original space, save <case_id>_Pred.nii.gz.
 """
@@ -26,6 +18,8 @@ import os
 import sys
 from pathlib import Path
 import warnings
+import csv
+from scipy import ndimage
 
 import numpy as np
 import SimpleITK as sitk
@@ -44,40 +38,87 @@ from networks.SwinTransModels import SwinUNETR_CrossModalityFusion_OutSum_6stage
 warnings.filterwarnings("ignore")
 
 # ── Physical post-processing threshold ───────────────────────────────────────
-_SMALL_OBJ_THRESHOLD_MM3 = 125.0   # 0.125 cm³
+class_thresholds = {
+            1: 100.0,  # GTVp (Tumors)
+            2: 50.0    # GTVn (Nodules)
+        }  # These thresholds are in mm³ and will be converted to voxel counts dynamically per case
 
 
 # ── Post-processing (unchanged from original) ─────────────────────────────────
 
-def _remove_border_objects(pred_np: np.ndarray, bg_val: int = 0) -> np.ndarray:
-    pred_filtered = np.zeros_like(pred_np)
-    for cls in np.unique(pred_np):
-        if cls == bg_val:
+def _remove_border_objects_tracked(pred: np.ndarray, spacing_mm: tuple) -> tuple:
+    """
+    Removes objects touching the volume border and tracks the volume and count removed per class.
+    """
+    out = pred.copy() # Safe initialization: preserves background and un-targeted classes
+    border_vols = {1: 0.0, 2: 0.0}
+    border_counts = {1: 0, 2: 0}
+    
+    struct = ndimage.generate_binary_structure(3, 3)
+    vox_vol = spacing_mm[0] * spacing_mm[1] * spacing_mm[2]
+
+    for cls in (1, 2):
+        if not (pred == cls).any():
             continue
-        cleared = clear_border((pred_np == cls))
-        pred_filtered[cleared] = cls
-    n_removed = int((pred_np > 0).sum()) - int((pred_filtered > 0).sum())
-    if n_removed > 0:
-        print(f"   [ClearBorder] voxels removed: {n_removed}")
-    return pred_filtered
+            
+        mask = (pred == cls)
+        cleared = clear_border(mask)
+
+        # Find exactly what was deleted
+        deleted_mask = mask & (~cleared)
+        
+        # Zero out the deleted border objects in the output array
+        out[deleted_mask] = 0
+        
+        border_vols[cls] = float(deleted_mask.sum() * vox_vol)
+        _, count = ndimage.label(deleted_mask, structure=struct)
+        border_counts[cls] = count
+
+    return out, border_vols[1], border_vols[2], border_counts[1], border_counts[2]
 
 
-def _remove_small_objects_physical(pred_np: np.ndarray,
-                                   spacing_mm: tuple,
-                                   threshold_mm3: float = _SMALL_OBJ_THRESHOLD_MM3,
-                                   foreground_classes: tuple = (1, 2)) -> np.ndarray:
-    voxel_vol_mm3 = spacing_mm[0] * spacing_mm[1] * spacing_mm[2]
-    min_size_vox  = max(1, math.ceil(threshold_mm3 / voxel_vol_mm3))
-    remover       = RemoveSmallObjects(min_size=min_size_vox, connectivity=3)
-    pred_filtered = pred_np.copy()
-    for cls in foreground_classes:
-        binary_t        = torch.from_numpy((pred_np == cls).astype(np.uint8)[None])
-        binary_filtered = remover(binary_t).numpy()[0]
-        pred_filtered[(pred_filtered == cls) & (binary_filtered == 0)] = 0
-    n_removed = int((pred_np > 0).sum()) - int((pred_filtered > 0).sum())
-    print(f"   [RemoveSmallObjects] min={min_size_vox} vox "
-          f"({threshold_mm3:.0f} mm³) | removed: {n_removed}")
-    return pred_filtered
+def _remove_small_objects_tracked(pred: np.ndarray, spacing_mm: tuple, thresholds_mm3: dict) -> tuple:
+    """
+    Removes small connected components using class-specific volume thresholds (in mm³),
+    and tracks the volume removed per class and count of objects removed per class.
+    
+    thresholds_mm3 expected format: {1: 100.0, 2: 50.0}
+    """
+    vox_vol = spacing_mm[0] * spacing_mm[1] * spacing_mm[2]
+    out = pred.copy()
+    removed_vols = {1: 0.0, 2: 0.0}
+    removed_counts = {1: 0, 2: 0}
+
+    # 3D connectivity structure for counting objects
+    struct = ndimage.generate_binary_structure(3, 3)
+
+    for cls, thresh_mm3 in thresholds_mm3.items():
+        if not (pred == cls).any():
+            continue
+            
+        # Calculate minimum voxels dynamically for this specific class
+        min_vox = max(1, math.ceil(thresh_mm3 / vox_vol))
+        remover = RemoveSmallObjects(min_size=min_vox, connectivity=3)
+        
+        binary = torch.from_numpy((pred == cls).astype(np.uint8)[None])
+        filt = remover(binary).numpy()[0]
+        
+        # Identify exactly what was deleted
+        deleted_mask = (out == cls) & (filt == 0)
+        removed_vols[cls] = float(deleted_mask.sum() * vox_vol)
+
+        # Count connected components removed
+        _, num_removed = ndimage.label(deleted_mask, structure=struct)
+        removed_counts[cls] = num_removed
+        
+        # Apply the deletion to the output mask
+        out[deleted_mask] = 0
+
+    return (
+        out, 
+        removed_vols.get(1, 0.0), removed_vols.get(2, 0.0), 
+        removed_counts.get(1, 0), removed_counts.get(2, 0)
+    )
 
 
 # ── Inverse transform: NPZ crop-space → original CT space ────────────────────
@@ -128,6 +169,11 @@ def inverse_transform_to_original_space(pred_crop: np.ndarray,
     r.SetOutputPixelType(sitk.sitkUInt8)
     return r.Execute(pred_sitk)
 
+def get_ras_spacing(npz_data) -> tuple:
+    dummy = sitk.Image(1, 1, 1, sitk.sitkUInt8)
+    dummy.SetSpacing([float(x) for x in npz_data["orig_spacing"]])
+    dummy.SetDirection([float(x) for x in npz_data["orig_direction"].flatten()])
+    return sitk.DICOMOrient(dummy, "RAS").GetSpacing()
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -194,6 +240,21 @@ def main():
     roi_size = (args.roi_x, args.roi_y, args.roi_z)
     model    = None   # lazy-loaded on first case that actually needs inference
 
+    # ── CSV logging for post-processing volumes removed ───────────────────
+    csv_log_path = os.path.join(args.output_dir, "postprocessing_logs.csv")
+    csv_headers = [
+        "case_id", "patient", "timepoint", "study_date", 
+        "border_removed_GTVp_mm3", "border_removed_GTVn_mm3",
+        "small_obj_removed_GTVp_mm3", "small_obj_removed_GTVn_mm3",
+        "border_removed_GTVp_count", "border_removed_GTVn_count",
+        "small_obj_removed_GTVp_count", "small_obj_removed_GTVn_count",
+        "total_removed_GTVp_count", "total_removed_GTVn_count"
+    ]
+    with open(csv_log_path, mode='w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(csv_headers)
+    
+    # ── Inference loop ────────────────────────────────────────────────────
     for idx, entry in enumerate(all_entries):
         torch.cuda.empty_cache()
         gc.collect()
@@ -206,11 +267,11 @@ def main():
         output_path = os.path.join(test_output_dir, f"{case_id}_Pred.nii.gz")
 
         if args.skip_existing and os.path.exists(output_path):
-            print(f"⏭  [{idx+1}/{len(all_entries)}] Skipping {case_id} (already exists)")
+            print(f">>  [{idx+1}/{len(all_entries)}] Skipping {case_id} (already exists)")
             continue
 
         if not os.path.exists(npz_path):
-            print(f"❌ [{idx+1}/{len(all_entries)}] NPZ not found: {npz_path}")
+            print(f" [{idx+1}/{len(all_entries)}] NPZ not found: {npz_path}")
             continue
 
         # ── Load NPZ ──────────────────────────────────────────────────────
@@ -262,18 +323,39 @@ def main():
         del val_inputs, val_outputs
 
         # --- CALCULATE TRUE NATIVE RAS SPACING ---
-        # Simulate orienting the original metadata to RAS to get the exact spacing 
-        # the array had during the network inference.
-        dummy = sitk.Image(1, 1, 1, sitk.sitkUInt8)
-        dummy.SetSpacing([float(x) for x in npz_data["orig_spacing"]])
-        dummy.SetDirection([float(x) for x in npz_data["orig_direction"].flatten()])
-        ras_spacing = sitk.DICOMOrient(dummy, "RAS").GetSpacing()
+        ras_spacing = get_ras_spacing(npz_data)
 
         # ── Post-processing ───────────────────────────────────────────────
-        # Spacing used for physical-threshold small-object removal is 1mm
-        # isotropic because the prediction lives in the pre-processed space.
-        pred_np = _remove_border_objects(pred_np)
-        pred_np = _remove_small_objects_physical(pred_np, spacing_mm=ras_spacing)
+        # 1. Remove border objects and unpack tracked metrics
+        (pred_np, 
+         border_vol_1, border_vol_2, 
+         border_count_1, border_count_2) = _remove_border_objects_tracked(pred_np, spacing_mm=ras_spacing)
+        
+        # 2. Remove small objects and unpack tracked metrics
+        (pred_np, 
+         small_vol_1, small_vol_2, 
+         small_count_1, small_count_2) = _remove_small_objects_tracked(pred_np, spacing_mm=ras_spacing, thresholds_mm3=class_thresholds)
+
+        # ── Append Tracking Metrics to CSV ────────────────────────────────
+        patient = case_id.split('_')[0] if '_' in case_id else case_id
+        
+        row_data = [
+            case_id, 
+            patient,     # patient
+            "",          # timepoint
+            "",          # study_date
+            border_vol_1, border_vol_2,
+            small_vol_1, small_vol_2,
+            border_count_1, border_count_2,
+            small_count_1, small_count_2,
+            border_count_1 + small_count_1, # total_removed_GTVp_count
+            border_count_2 + small_count_2  # total_removed_GTVn_count
+        ]
+        
+        # Append the row to the CSV file
+        with open(csv_log_path, mode='a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(row_data)
 
         # ── Inverse transform → original CT space ─────────────────────────
         prediction_sitk = inverse_transform_to_original_space(pred_np, npz_data, ras_spacing)
