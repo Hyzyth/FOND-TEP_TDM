@@ -27,7 +27,7 @@ RUN_KFOLD_PRODUCTION_FULL=false  # Trains a final model on 100% of the train poo
 # ── 2. Hardware & Hyperparameters ──────────────────────────────────────────
 GPU=0
 BATCH_SIZE=2
-CACHE_RATE=0.5  # Reduce if you lack RAM
+CACHE_RATE=0.4  # Reduce if you lack RAM
 K_FOLDS=5
 EPOCH_NUMBER_CLASSIC=1500
 EPOCH_NUMBER_KFOLD=$(($EPOCH_NUMBER_CLASSIC / $K_FOLDS)) # Adjust epochs for k-fold to keep total training time similar to classic
@@ -103,6 +103,8 @@ if [ "$RUN_CLASSIC_RESUME" = true ]; then
         --warmup_epochs   50 \
         --batch_size      $BATCH_SIZE \
         --val_every       20 \
+        --workers         4 \
+        --cache_rate      $CACHE_RATE \
         --lrschedule      warmup_cosine \
         --noamp \
         --save_checkpoint \
