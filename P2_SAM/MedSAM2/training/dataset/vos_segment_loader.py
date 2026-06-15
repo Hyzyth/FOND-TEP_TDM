@@ -96,7 +96,6 @@ class JSONSegmentLoader:
             for obj_id, valid_frames in list(res.items()):
                 if len(valid_frames) < num_frames_min:
                     res.pop(obj_id)
-
         return res
 
 
@@ -108,13 +107,10 @@ class PalettisedPNGSegmentLoader:
         """
         self.video_png_root = video_png_root
         self.sample_rate = sample_rate
-        # build a mapping from frame id to their PNG mask path
-        # note that in some datasets, the PNG paths could have more
-        # than 5 digits, e.g. "00000000.png" instead of "00000.png"
-        png_filenames = sorted(glob.glob(os.path.join(self.video_png_root, "*.png"))) # os.listdir(self.video_png_root)
+        png_filenames = sorted(glob.glob(os.path.join(self.video_png_root, "*.png")))
         self.frame_id_to_png_filename = {}
         for idx, filename in enumerate(png_filenames[::self.sample_rate]):
-            frame_id = idx # int(os.path.basename(filename).split(".")[0])
+            frame_id = idx
             self.frame_id_to_png_filename[frame_id] = filename
 
     def load(self, frame_id):
@@ -125,15 +121,11 @@ class PalettisedPNGSegmentLoader:
         Return:
             binary_segments: dict
         """
-        # check the path
         mask_path = os.path.join(
             self.video_png_root, self.frame_id_to_png_filename[frame_id]
         )
-
-        # load the mask
         masks = PILImage.open(mask_path).convert("P")
         masks = np.array(masks)
-
         object_id = pd.unique(masks.flatten())
         object_id = object_id[object_id != 0]  # remove background (0)
 
@@ -142,7 +134,6 @@ class PalettisedPNGSegmentLoader:
         for i in object_id:
             bs = masks == i
             binary_segments[i] = torch.from_numpy(bs)
-
         return binary_segments
 
     def __len__(self):
@@ -166,9 +157,7 @@ class MultiplePNGSegmentLoader:
         self.H = tmp_mask.shape[0]
         self.W = tmp_mask.shape[1]
         if self.single_object_mode:
-            self.obj_id = (
-                int(video_png_root.split("/")[-1]) + 1
-            )  # offset by 1 as bg is 0
+            self.obj_id = int(video_png_root.split("/")[-1]) + 1 # offset by 1 as bg is 0
         else:
             self.obj_id = None
 
@@ -188,7 +177,6 @@ class MultiplePNGSegmentLoader:
         """
         mask_path = os.path.join(self.video_png_root, f"{frame_id:05d}.png")
         binary_segments = {}
-
         if os.path.exists(mask_path):
             mask = np.array(PILImage.open(mask_path))
         else:
@@ -205,24 +193,20 @@ class MultiplePNGSegmentLoader:
         Return:
             binary_segments: dict
         """
-        # get the path
         all_objects = sorted(glob.glob(os.path.join(self.video_png_root, "*")))
         num_objects = len(all_objects)
         assert num_objects > 0
 
-        # load the masks
         binary_segments = {}
         for obj_folder in all_objects:
-            # obj_folder is {video_name}/{obj_id}, obj_id is specified by the name of the folder
             obj_id = int(obj_folder.split("/")[-1])
-            obj_id = obj_id + 1  # offset 1 as bg is 0
+            obj_id = obj_id + 1
             mask_path = os.path.join(obj_folder, f"{frame_id:05d}.png")
             if os.path.exists(mask_path):
                 mask = np.array(PILImage.open(mask_path))
             else:
                 mask = np.zeros((self.H, self.W), dtype=bool)
             binary_segments[obj_id] = torch.from_numpy(mask > 0)
-
         return binary_segments
 
     def __len__(self):
@@ -230,9 +214,7 @@ class MultiplePNGSegmentLoader:
 
 
 class LazySegments:
-    """
-    Only decodes segments that are actually used.
-    """
+    """Only decodes segments that are actually used."""
 
     def __init__(self):
         self.segments = {}
@@ -271,7 +253,6 @@ class SA1BSegmentLoader:
             self.frame_annots = json.load(f)
 
         if mask_area_frac_thresh <= 1.0:
-            # Lazily read frame
             orig_w, orig_h = PILImage.open(video_frame_path).size
             area = orig_w * orig_h
 
@@ -284,7 +265,6 @@ class SA1BSegmentLoader:
             if ("uncertain_iou" in frame_annot) and (
                 frame_annot["uncertain_iou"] < uncertain_iou
             ):
-                # uncertain_iou is stability score
                 continue
             if (
                 mask_area_frac_thresh <= 1.0
@@ -302,32 +282,36 @@ class SA1BSegmentLoader:
 
 
 class NPZSegmentLoader:
-    def __init__(self, masks):
-        """
-        Initialize the NPZSegmentLoader.
-        
-        Args:
-            masks (numpy.ndarray): Array of masks with shape (img_num, H, W).
-        """
+    """Load per-slice segmentation masks from a pre-sliced numpy array.
+
+    Parameters
+    ----------
+    masks : np.ndarray  shape (num_slices, H, W) uint8
+        Multi-label mask array where 0 = background, 1 = GTVp, 2 = GTVn.
+        For SwinCross NPZ format, this is the ``label`` array after the
+        (R, A, S) -> (S, R, A) transpose performed in HECKTORNPZRawDataset.
+    """
+
+    def __init__(self, masks: np.ndarray):
         self.masks = masks
 
-    def load(self, frame_idx):
+    def load(self, frame_idx: int) -> dict:
+        """Return binary mask dict for a single slice.
+
+        Parameters
+        ----------
+        frame_idx : int  Slice index along axis 0.
+
+        Returns
+        -------
+        dict[int, torch.BoolTensor]  {label_id: (H, W) bool tensor}
+            Only labels present in the slice are included.
         """
-        Load the single mask for the given frame index and convert it to binary segments.
+        mask = self.masks[frame_idx]   # (H, W) uint8
 
-        Args:
-            frame_idx (int): Index of the frame to load.
-
-        Returns:
-            dict: A dictionary where keys are object IDs and values are binary masks.
-        """
-        mask = self.masks[frame_idx]
-
-        # Find unique object IDs in the mask, excluding the background (0)
         object_ids = np.unique(mask)
-        object_ids = object_ids[object_ids != 0]
+        object_ids = object_ids[object_ids != 0]   # exclude background
 
-        # Convert into binary segmentation masks for each object
         binary_segments = {}
         for obj_id in object_ids:
             binary_mask = (mask == obj_id)
