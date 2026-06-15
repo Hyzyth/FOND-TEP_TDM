@@ -12,10 +12,10 @@ from functools import partial
 import numpy as np
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy('file_system')
 import torch.nn as nn
 import torch.nn.parallel
-import torch.utils.data.distributed
 from monai.inferers.utils import sliding_window_inference
 from monai.losses.dice import DiceFocalLoss
 from monai.losses.tversky import TverskyLoss
@@ -129,9 +129,8 @@ parser.add_argument("--smooth_nr",         default=1e-5, type=float)
 parser.add_argument("--gamma",             default=0.75,  type=float)
 parser.add_argument("--alpha",             default=0.3,  type=float) # FP Penalty
 parser.add_argument("--beta",              default=0.7,  type=float) # FN Penalty
-parser.add_argument("--cache_rate",        default=1.0,  type=float,
-                    help="Fraction of training data to cache in RAM. "
-                         "0.0 = no cache (always fast with NPZ).")
+parser.add_argument("--lmdb_dir", default="/data/ethan/SwinCross_LMDB_cache", type=str,
+                    help="Directory containing the pre-built LMDB databases.")
         
 def main():
     args = parser.parse_args()
@@ -141,7 +140,7 @@ def main():
         args.ngpus_per_node = torch.cuda.device_count()
         print("Found total GPUs:", args.ngpus_per_node)
         args.world_size = args.ngpus_per_node * args.world_size
-        mp.spawn(main_worker, nprocs=args.ngpus_per_node, args=(args,))
+        torch.multiprocessing.spawn(main_worker, nprocs=args.ngpus_per_node, args=(args,))
     else:
         main_worker(gpu=0, args=args)
 

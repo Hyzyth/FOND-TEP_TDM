@@ -13,19 +13,6 @@
 data_utils.py  —  SwinCross NPZ-based data pipeline
 =====================================================
 
-Key changes vs. the original:
-  1.  LoadNPZd  — new transform: loads pre-processed NPZ files produced by
-                  prepare_hecktor_npz_swincross.py / prepare_temporal_npz_swincross.py.
-                  Heavy offline ops (orient, resample, crop) are already baked in;
-                  only lightweight augmentations remain in the online transform chain.
-  2.  cache_num removed  — the original CacheDataset had cache_num=24 hard-coded,
-                  silently capping the cache at 24 patients even when cache_rate=1.0.
-                  Now cache_rate alone controls caching.
-  3.  persistent_workers=True  — workers now stay alive across batches, eliminating
-                  per-epoch process-spawn overhead.
-  4.  prefetch_factor=2  — each worker pre-loads the next 2 batches so the GPU
-                  never stalls on I/O.
-
 JSON entry expected format (produced by the preprocessing scripts):
   { "npz": "train/HGJ_001.npz", "label": "labelsTr/HGJ_001_gt.nii.gz", "case_id": "HGJ_001" }
 
@@ -35,15 +22,17 @@ The "label" key is used by evaluate_predictions.py (offline evaluation).
 
 import math
 import os
-
 import numpy as np
 import torch
+import lmdb
+import pickle
+from pathlib import Path
 from monai import data, transforms
 from monai.data.decathlon_datalist import load_decathlon_datalist
 from monai.transforms import Transform
 
 
-# ── Distributed sampler (unchanged) ──────────────────────────────────────────
+# ── Distributed sampler ──────────────────────────────────────────
 
 class Sampler(torch.utils.data.Sampler):
     def __init__(self, dataset, num_replicas=None, rank=None,
@@ -94,54 +83,53 @@ class Sampler(torch.utils.data.Sampler):
     def set_epoch(self, epoch):
         self.epoch = epoch
 
-
-# ── NPZ loader ────────────────────────────────────────────────────────────────
-
-class LoadNPZd(Transform):
+# ── LMDB Loader ──────────────────────────────────────────────────────────────
+class LoadLMDBd(Transform):
     """
-    Load a pre-processed SwinCross NPZ file into the transform dictionary.
-
-    Reads  data["npz"]  (a path string) and populates:
-      data["image"]  : (2, R, A, S) float32  — ch0=PET, ch1=CT
-      data["label"]  : (1, R, A, S) int64    — 0=bg, 1=GTVp, 2=GTVn
-      data[<meta>]   : numpy arrays for inverse-transform (used by test.py)
-
-    By inheriting from monai.transforms.Transform (a non-Randomizable base),
-    CacheDataset correctly identifies this as a deterministic transform and
-    caches its output, re-applying only the random augmentations on every access.
+    Reads directly from the LMDB cache using zero-copy byte extraction.
     """
+    def __init__(self, lmdb_dir):
+        self.lmdb_dir = lmdb_dir
+        self.env = None
 
-    _META_KEYS = (
-        "ras_origin", "ras_direction", "ras_size_itk",
-        "crop_start", "crop_end",
-        "orig_spacing", "orig_origin", "orig_direction", "orig_size_itk",
-    )
+    def _init_env(self):
+        if self.env is None:
+            self.env = lmdb.open(
+                self.lmdb_dir, readonly=True, lock=False, readahead=False, meminit=False
+            )
 
     def __call__(self, data_dict):
-        d        = dict(data_dict)
-        npz_path = str(d["npz"])
+        self._init_env()
+        d = dict(data_dict)
+        case_id = str(d["case_id"])
 
-        # Use a 'with' block to ensure the file is closed immediately
-        with np.load(npz_path, allow_pickle=False) as npz:
-            # Extract, cast back to float32, and fuse: (2, R, A, S)
-            pet_arr = npz["pet"].astype(np.float32)
-            ct_arr  = npz["ct"].astype(np.float32)
-            d["image"] = np.stack([pet_arr, ct_arr], axis=0)
+        with self.env.begin(write=False) as txn:
+            meta_bytes = txn.get(f"{case_id}_meta".encode("ascii"))
+            if meta_bytes is None:
+                raise KeyError(f"Case {case_id} not found in LMDB {self.lmdb_dir}.")
+            
+            meta = pickle.loads(meta_bytes)
+            ct_bytes = txn.get(f"{case_id}_ct".encode("ascii"))
+            pet_bytes = txn.get(f"{case_id}_pet".encode("ascii"))
+            label_bytes = txn.get(f"{case_id}_label".encode("ascii"))
 
-            # label: (R, A, S) → (1, R, A, S)  int64
-            d["label"] = npz["label"].copy().astype(np.int64)[np.newaxis]
+        # Reconstruct arrays instantly. .copy() is required because frombuffer is read-only
+        # and MONAI transforms require writable arrays.
+        ct_arr = np.frombuffer(ct_bytes, dtype=np.dtype(meta["ct_dtype"])).reshape(meta["ct_shape"]).copy()
+        pet_arr = np.frombuffer(pet_bytes, dtype=np.dtype(meta["pet_dtype"])).reshape(meta["pet_shape"]).copy()
+        label_arr = np.frombuffer(label_bytes, dtype=np.dtype(meta["label_dtype"])).reshape(meta["label_shape"]).copy()
 
-            # Inverse-transform metadata
-            for k in self._META_KEYS:
-                if k in npz:
-                    d[k] = npz[k].copy()
+        # Format exactly as the model expects
+        d["image"] = np.stack([pet_arr.astype(np.float32), ct_arr.astype(np.float32)], axis=0)
+        d["label"] = label_arr.astype(np.int64)[np.newaxis]
+        
+        d["case_id"] = meta["case_id"]
+        d["npz_path"] = meta["npz_path"]
 
-        d["npz_path"] = npz_path
         return d
 
 
 # ── Label cleanup helpers ─────────────────────────────────────────────────────
-
 def _clamp_label(x):
     """Clamp and round label to valid integer range [0, 2].
     Works on both numpy arrays and torch Tensors."""
@@ -151,7 +139,6 @@ def _clamp_label(x):
 
 
 # ── DataLoader builder ────────────────────────────────────────────────────────
-
 def get_loader(args):
     """
     Build and return DataLoaders from a SwinCross NPZ JSON list.
@@ -162,13 +149,17 @@ def get_loader(args):
     """
     data_dir      = args.data_dir
     datalist_json = os.path.join(data_dir, args.json_list)
-    loader_npz    = LoadNPZd()
+    
+    # Dynamically resolve LMDB paths based on JSON name (e.g. dataset_swincross_2026kfold_classic.json)
+    json_stem = Path(args.json_list).stem
+    train_lmdb_path = os.path.join(args.lmdb_dir, f"{json_stem}_training.lmdb")
+    val_lmdb_path = os.path.join(args.lmdb_dir, f"{json_stem}_validation.lmdb")
 
     # ── Training transform ────────────────────────────────────────────────
     # All heavy ops (orient, resample, crop foreground) were done offline.
     # Only fast augmentations remain here.
     train_transform = transforms.Compose([
-        loader_npz,
+        LoadLMDBd(train_lmdb_path),
         transforms.SpatialPadd(
             keys=["image", "label"],
             spatial_size=(args.roi_x, args.roi_y, args.roi_z),
@@ -185,28 +176,19 @@ def get_loader(args):
             image_threshold=0,
             warn=False,         # Don't warn if not enough tumor/nodule pixels to fill all patches
         ),
-        transforms.RandFlipd(keys=["image", "label"],
-                             prob=args.RandFlipd_prob, spatial_axis=0),
-        transforms.RandFlipd(keys=["image", "label"],
-                             prob=args.RandFlipd_prob, spatial_axis=1),
-        transforms.RandFlipd(keys=["image", "label"],
-                             prob=args.RandFlipd_prob, spatial_axis=2),
-        transforms.RandRotate90d(keys=["image", "label"],
-                                  prob=args.RandRotate90d_prob, max_k=3),
-        transforms.RandScaleIntensityd(keys="image",
-                                        factors=0.1,
-                                        prob=args.RandScaleIntensityd_prob),
-        transforms.RandShiftIntensityd(keys="image",
-                                        offsets=0.1,
-                                        prob=args.RandShiftIntensityd_prob),
-        # Clamp after augmentation to ensure label integrity
+        transforms.RandFlipd(keys=["image", "label"], prob=args.RandFlipd_prob, spatial_axis=0),
+        transforms.RandFlipd(keys=["image", "label"], prob=args.RandFlipd_prob, spatial_axis=1),
+        transforms.RandFlipd(keys=["image", "label"], prob=args.RandFlipd_prob, spatial_axis=2),
+        transforms.RandRotate90d(keys=["image", "label"], prob=args.RandRotate90d_prob, max_k=3),
+        transforms.RandScaleIntensityd(keys="image", factors=0.1, prob=args.RandScaleIntensityd_prob),
+        transforms.RandShiftIntensityd(keys="image", offsets=0.1, prob=args.RandShiftIntensityd_prob),
         transforms.Lambdad(keys="label", func=_clamp_label),
         transforms.ToTensord(keys=["image", "label"]),
     ])
 
     # ── Validation transform (full volume, no augmentation) ───────────────
     val_transform = transforms.Compose([
-        loader_npz,
+        LoadLMDBd(val_lmdb_path),
         transforms.Lambdad(keys="label", func=_clamp_label),
         transforms.ToTensord(keys=["image", "label"]),
     ])
@@ -228,32 +210,16 @@ def get_loader(args):
 
     # ── Test / inference mode ─────────────────────────────────────────────
     if args.test_mode:
-        test_files = load_decathlon_datalist(
-            datalist_json, True, "validation", base_dir=data_dir)
+        test_files = load_decathlon_datalist(datalist_json, True, "validation", base_dir=data_dir)
         test_ds = data.Dataset(data=test_files, transform=val_transform)
         test_sampler = Sampler(test_ds, shuffle=False) if args.distributed else None
-        return _make_loader(test_ds, batch_size=1, shuffle=False,
-                            sampler=test_sampler)
+        return _make_loader(test_ds, batch_size=1, shuffle=False, sampler=test_sampler)
 
     # ── Training mode ─────────────────────────────────────────────────────
-    datalist = load_decathlon_datalist(
-        datalist_json, True, "training", base_dir=data_dir)
-
-    datalist.sort(key=lambda d: os.path.getsize(d["npz"]), reverse=True)  # Sort by NPZ file size (largest first) to optimize caching
-
-    if args.use_normal_dataset or args.cache_rate == 0.0:
-        train_ds = data.Dataset(data=datalist, transform=train_transform)
-    else:
-        # CacheDataset caches up to the last *deterministic* transform
-        # (LoadNPZd + SpatialPadd), then applies random transforms on every
-        # access.  cache_num is intentionally NOT set so cache_rate alone
-        # governs how many patients are cached.
-        train_ds = data.CacheDataset(
-            data=datalist,
-            transform=train_transform,
-            cache_rate=args.cache_rate,
-            num_workers=args.workers,
-        )
+    datalist = load_decathlon_datalist(datalist_json, True, "training", base_dir=data_dir)
+    
+    # LMDB is incredibly fast, so we don't need MONAI's memory cache
+    train_ds = data.Dataset(data=datalist, transform=train_transform)
 
     train_sampler = Sampler(train_ds) if args.distributed else None
     train_loader  = _make_loader(
@@ -263,11 +229,9 @@ def get_loader(args):
         sampler=train_sampler,
     )
 
-    val_files = load_decathlon_datalist(
-        datalist_json, True, "validation", base_dir=data_dir)
+    val_files = load_decathlon_datalist(datalist_json, True, "validation", base_dir=data_dir)
     val_ds      = data.Dataset(data=val_files, transform=val_transform)
     val_sampler = Sampler(val_ds, shuffle=False) if args.distributed else None
-    val_loader  = _make_loader(val_ds, batch_size=1, shuffle=False,
-                               sampler=val_sampler)
+    val_loader  = _make_loader(val_ds, batch_size=1, shuffle=False, sampler=val_sampler)
 
     return [train_loader, val_loader]

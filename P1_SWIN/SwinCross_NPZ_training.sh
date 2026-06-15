@@ -27,7 +27,6 @@ RUN_KFOLD_PRODUCTION_FULL=false  # Trains a final model on 100% of the train poo
 # ── 2. Hardware & Hyperparameters ──────────────────────────────────────────
 GPU=0
 BATCH_SIZE=2
-CACHE_RATE=0.4  # Reduce if you lack RAM
 K_FOLDS=5
 EPOCH_NUMBER_CLASSIC=1500
 EPOCH_NUMBER_KFOLD=$(($EPOCH_NUMBER_CLASSIC / $K_FOLDS)) # Adjust epochs for k-fold to keep total training time similar to classic
@@ -35,6 +34,7 @@ EPOCH_NUMBER_KFOLD=$(($EPOCH_NUMBER_CLASSIC / $K_FOLDS)) # Adjust epochs for k-f
 # ── 3. Data Paths & Naming ─────────────────────────────────────────────────
 PPDATA_FOLDER="/data/ethan/PP_hecktor2026_kfold_npz"
 JSON_PREFIX="dataset_swincross_2026kfold"
+LMDB_DIR="/data/ethan/SwinCross_LMDB_cache"
 
 CLASSIC_MODEL_DIR="HECKTOR_run_${EPOCH_NUMBER_CLASSIC}_epoch"
 KFOLD_BASE_DIR="HECKTOR_kfold_${EPOCH_NUMBER_KFOLD}ep"
@@ -58,11 +58,32 @@ source swincross_env/bin/activate
 mkdir -p /data/ethan/SwinCross
 ln -sfn /data/ethan/SwinCross ./runs
 
+# ── HELPER: LMDB BUILDER ──────────────────────────────────────────────────────
+ensure_lmdb() {
+    local JSON_NAME=$1
+    local JSON_STEM="${JSON_NAME%.*}"
+    # We check for the training split explicitly since some runs might lack a validation fold
+    local EXPECTED_LMDB="$LMDB_DIR/${JSON_STEM}_training.lmdb"
+
+    if [ ! -d "$EXPECTED_LMDB" ]; then
+        echo "  [INFO] LMDB cache missing for $JSON_NAME. Building now..."
+        python3.12 npz_version/build_lmdb_cache.py \
+            --data_dir "$PPDATA_FOLDER" \
+            --json_list "$JSON_NAME" \
+            --out_dir "$LMDB_DIR"
+    else
+        echo "  [INFO] LMDB cache verified for $JSON_NAME."
+    fi
+}
 
 # ╔════════════════════════════════════════════════════════════════════════╗
 # ║                               EXECUTION                                ║
 # ╚════════════════════════════════════════════════════════════════════════╝
 # ── A. CLASSIC TRAINING ───────────────────────────────────────────────────
+if [ "$RUN_CLASSIC_TRAIN" = true ] || [ "$RUN_CLASSIC_RESUME" = true ]; then
+    ensure_lmdb "${JSON_PREFIX}_classic.json"
+fi
+
 if [ "$RUN_CLASSIC_TRAIN" = true ]; then
     echo "╔════════════════════════════════════════════════════════════╗"
     echo "║  CLASSIC TRAINING (${EPOCH_NUMBER_CLASSIC} Epochs)                            ║"
@@ -73,12 +94,12 @@ if [ "$RUN_CLASSIC_TRAIN" = true ]; then
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     python3.12 -u npz_version/train.py \
         --data_dir   $PPDATA_FOLDER \
+        --lmdb_dir   $LMDB_DIR \
         --logdir     $CLASSIC_MODEL_DIR \
         --json_list  ${JSON_PREFIX}_classic.json \
         --batch_size $BATCH_SIZE \
         --val_every  20 \
         --workers    4 \
-        --cache_rate $CACHE_RATE \
         --max_epochs $EPOCH_NUMBER_CLASSIC \
         --warmup_epochs 50 \
         --RandFlipd_prob           0.5 \
@@ -96,6 +117,7 @@ if [ "$RUN_CLASSIC_RESUME" = true ]; then
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     python3.12 -u npz_version/train.py \
         --data_dir        $PPDATA_FOLDER \
+        --lmdb_dir        $LMDB_DIR \
         --json_list       ${JSON_PREFIX}_classic.json \
         --logdir          $CLASSIC_MODEL_DIR \
         --checkpoint      ./runs/$CLASSIC_MODEL_DIR/model_last.pth \
@@ -104,7 +126,6 @@ if [ "$RUN_CLASSIC_RESUME" = true ]; then
         --batch_size      $BATCH_SIZE \
         --val_every       20 \
         --workers         4 \
-        --cache_rate      $CACHE_RATE \
         --lrschedule      warmup_cosine \
         --noamp \
         --save_checkpoint \
@@ -127,6 +148,9 @@ if [ "$RUN_KFOLD_TRAIN" = true ]; then
 
     for fold in $(seq 0 $((K_FOLDS - 1))); do
         JSON_LIST="${JSON_PREFIX}_fold${fold}.json"
+
+        ensure_lmdb "$JSON_LIST"
+
         MODEL_DIR="${KFOLD_BASE_DIR}_fold${fold}"
         mkdir -p /data/ethan/SwinCross/$MODEL_DIR
 
@@ -135,12 +159,12 @@ if [ "$RUN_KFOLD_TRAIN" = true ]; then
         PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
         python3.12 -u npz_version/train.py \
             --data_dir      $PPDATA_FOLDER \
+            --lmdb_dir      $LMDB_DIR \
             --logdir        $MODEL_DIR \
             --json_list     $JSON_LIST \
             --batch_size    $BATCH_SIZE \
             --val_every     20 \
             --workers       4 \
-            --cache_rate    $CACHE_RATE \
             --max_epochs    $EPOCH_NUMBER_KFOLD \
             --warmup_epochs 50 \
             --RandFlipd_prob           0.5 \
@@ -160,6 +184,7 @@ if [ "$RUN_KFOLD_PRODUCTION_FULL" = true ]; then
     echo "╔════════════════════════════════════════════════════════════╗"
     echo "║  PRODUCTION MODEL (100% of Train Pool Data)                ║"
     echo "╚════════════════════════════════════════════════════════════╝"
+    ensure_lmdb "${JSON_PREFIX}_full.json"
     FULL_MODEL_DIR="${KFOLD_BASE_DIR}_full_production"
     mkdir -p /data/ethan/SwinCross/$FULL_MODEL_DIR
     
@@ -167,12 +192,12 @@ if [ "$RUN_KFOLD_PRODUCTION_FULL" = true ]; then
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     python3.12 -u npz_version/train.py \
         --data_dir      $PPDATA_FOLDER \
+        --lmdb_dir      $LMDB_DIR \
         --logdir        $FULL_MODEL_DIR \
         --json_list     ${JSON_PREFIX}_full.json \
         --batch_size    $BATCH_SIZE \
         --val_every     20 \
         --workers       4 \
-        --cache_rate    $CACHE_RATE \
         --max_epochs    $EPOCH_NUMBER_KFOLD \
         --warmup_epochs 50 \
         --RandFlipd_prob           0.5 \
