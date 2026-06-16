@@ -297,7 +297,7 @@ def main():
         df = pd.read_csv(csv_path)
 
         # Only compute for numeric columns
-        numeric_cols = df.select_dtypes(includes=['float64', 'int64']).columns
+        numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
         mean_values = df[numeric_cols].mean().round(4).to_dict()
 
         # Create a new row representing the mean
