@@ -218,18 +218,15 @@ trainer:
             _target_: training.dataset.utils.ConcatDataset
             datasets:
               # HECKTOR NPZ dataset (GT: single file, labels 0=bg / 1=GTVp / 2=GTVn)
-              # Produced by: python data_preparation/prepare_hecktor_npz.py
               - _target_: training.dataset.vos_dataset.VOSDataset
                 transforms: ${vos.train_transforms}
                 training: true
-                video_dataset:
-                  _target_: training.dataset.hecktor_dataset.HECKTORNPZRawDataset
-                  folder: ${dataset.train_folder}
+                video_dataset: ${dataset.train.dataset} 
                 sampler:
                   _target_: training.dataset.vos_sampler.RandomUniformSampler
                   num_frames: ${scratch.num_frames}
                   max_num_objects: ${scratch.max_num_objects}
-                multiplier: ${dataset.multiplier}
+                multiplier: 1
       shuffle: True
       num_workers: ${scratch.num_train_workers}
       pin_memory: True

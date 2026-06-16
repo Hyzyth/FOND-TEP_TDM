@@ -313,7 +313,8 @@ if __name__ == "__main__":
 
     # Dataset override
     if args.dataset_path is not None:
-        cfg.dataset.train_folder = args.dataset_path
+        cfg.dataset.train.dataset.data_dir = args.dataset_path
+        cfg.dataset.val.dataset.data_dir = args.dataset_path
     # Output override
     if args.output_path is not None:
         cfg.launcher.experiment_log_dir = args.output_path
