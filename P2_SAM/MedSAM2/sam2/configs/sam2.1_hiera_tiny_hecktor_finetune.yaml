@@ -22,15 +22,24 @@ scratch:
   base_lr: 1.0e-4
   vision_lr: 1.0e-4
   phases_per_epoch: 1
-  num_epochs: 1900                 # Full training
+  num_epochs: 1500
 
 # ---------------------------------------------------------------------------
 # Dataset paths
 # ---------------------------------------------------------------------------
 dataset:
-  train_folder: /data/ethan/MedSAM2/hecktor_npz/train
-  val_folder:   /data/ethan/MedSAM2/hecktor_npz/val
-  multiplier: 1
+  train:
+    dataset:
+      _target_: training.dataset.hecktor_dataset.HECKTORNPZRawDataset
+      data_dir: /data/ethan/PP_hecktor2026_kfold_npz
+      json_list: dataset_swincross_2026kfold_classic.json
+      split: training
+  val:
+    dataset:
+      _target_: training.dataset.hecktor_dataset.HECKTORNPZRawDataset
+      data_dir: /data/ethan/PP_hecktor2026_kfold_npz
+      json_list: dataset_swincross_2026kfold_classic.json
+      split: validation
 
 # ---------------------------------------------------------------------------
 # Video-object segmentation augmentation pipeline
