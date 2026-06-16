@@ -22,7 +22,7 @@ scratch:
   base_lr: 1.0e-4
   vision_lr: 1.0e-4
   phases_per_epoch: 1
-  num_epochs: 1500
+  num_epochs: 1000
 
 # ---------------------------------------------------------------------------
 # Dataset paths
