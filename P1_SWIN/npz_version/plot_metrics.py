@@ -254,14 +254,32 @@ def generate_plots(csv_path: str, output_dir: str):
         valid = df[[gt_col, pred_col]].dropna()
         if valid.empty:
             continue
+            
+        # Draw the scatter points
         sns.scatterplot(x=gt_col, y=pred_col, data=valid, ax=ax,
                         color=color, alpha=0.7, edgecolor="white", s=60)
+                        
         max_val = max(valid[gt_col].max(), valid[pred_col].max())
+        
+        # 1. Plot the ideal y=x line
         ax.plot([0, max_val], [0, max_val], "r--", lw=1.5, label="y = x (ideal)")
+        
+        # 2. Calculate and plot the linear regression line
+        if len(valid) > 1: # Need at least 2 points for a line
+            m, b = np.polyfit(valid[gt_col], valid[pred_col], 1)
+            x_line = np.array([0, max_val])
+            y_line = m * x_line + b
+            
+            # Format the label nicely depending on if b is positive or negative
+            sign = "+" if b >= 0 else "-"
+            ax.plot(x_line, y_line, color="black", linestyle="-", lw=1.5, 
+                    label=f"Fit (y = {m:.2f}x {sign} {abs(b):.0f})")
+
         ax.set_title(f"{cls_name} — Volume Correlation (mm³)", fontweight="bold")
         ax.set_xlabel("GT Volume (mm³)")
         ax.set_ylabel("Predicted Volume (mm³)")
         ax.legend()
+        
     fig.suptitle("Predicted vs Ground-Truth Volume", fontsize=13, fontweight="bold")
     _save(fig, os.path.join(output_dir, "07_volume_correlation.png"))
 
