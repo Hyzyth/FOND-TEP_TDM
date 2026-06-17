@@ -1,34 +1,56 @@
 #!/usr/bin/env python3
 """
-evaluate_npz.py
-================
-Universal rich evaluation for MedSAM2 NPZ predictions.
+inference/evaluate_npz.py
+===========================
+Universal rich evaluation for MedSAM2 predictions on HECKTOR 2026 + TemPoRAL.
 
-Computes the same metrics as SwinCross's evaluate_predictions.py:
-  Dice, Jaccard, Hausdorff (mm), MHD/ASSD (mm),
-  Overlap on GT (recall), Overlap on Pred (precision),
-  volumes (mm³), object counts, volume similarity,
-  confusion-matrix volumes (TP/FP/FN/TN in mm³).
+Supports two case-discovery modes
+-----------------------------------
+JSON mode (SwinCross JSON)  - --data_dir + --json_list
+  Reads "training"/"validation"/"testing" keys.
+  GT loaded from the NIfTI path stored in the JSON entry ("label" key) - this
+  is the original-space GT NIfTI written by prepare_hecktor2026_kfold_npz.py.
+  Predictions are the NIfTI files written by infer_npz.py.
 
-Inputs:
-  --pred_dir  Directory of predicted NPZ files (key: 'segs').
-  --gt_dir    Directory of ground-truth NPZ files (key: 'gts', 'spacing').
-  --manifest  Optional path to manifest.json produced by prepare_temporal_npz.py
-              or prepare_hecktor_npz.py.  When absent, metadata is inferred
-              from GT content (compatible with HECKTOR NPZ dataset).
-  --output_dir Directory to write per_case_evaluation_rich.csv.
+Manifest mode (TemPoRAL)  - --data_dir + --json_list manifest.json
+  Reads "cases" list.
+  GT loaded from TemPoRAL NPZ "gts" key (uint8, DxHxW).
+  Predictions are the NIfTI files written by infer_npz.py.
 
-Usage:
-  python inference/evaluate_npz.py \\
-      --pred_dir /data/ethan/MedSAM2/predictions/gt_val \\
-      --gt_dir   /data/ethan/MedSAM2/hecktor_npz/val \\
-      --output_dir /data/ethan/MedSAM2/predictions/gt_val
+Legacy directory mode  - --pred_dir + --gt_dir
+  Pairs prediction NPZ/NIfTI files with GT NPZ/NIfTI files by case_id.
+  Supports both SwinCross GT NPZ ("label" key) and TemPoRAL GT NPZ ("gts" key).
 
-  python inference/evaluate_npz.py \\
-      --pred_dir  /data/ethan/MedSAM2/predictions/temporal_zeroshot \\
-      --gt_dir    /data/ethan/MedSAM2/temporal_npz \\
-      --manifest  /data/ethan/MedSAM2/temporal_npz/manifest.json \\
-      --output_dir /data/ethan/MedSAM2/predictions/temporal_zeroshot
+Spacing handling
+----------------
+SwinCross GT NIfTI  -> spacing read directly from the NIfTI image via SimpleITK.
+TemPoRAL GT NPZ     -> "spacing" key is (sz, sy, sx); converted to ITK (sx, sy, sz)
+                       for SimpleITK surface-distance computation.
+Prediction NIfTI    -> spacing read from the NIfTI image (set correctly by infer_npz.py).
+
+MEAN summary row
+----------------
+A MEAN row is appended at the end of the CSV, matching SwinCross evaluate_predictions.py.
+
+Metric set
+----------
+Dice, Jaccard, Hausdorff (mm), MHD/ASSD (mm), Overlap on GT (recall),
+Overlap on Pred (precision), volumes (mm³), object counts, volume similarity,
+TP/FP/FN/TN volumes (mm³).
+
+Usage - SwinCross JSON (HECKTOR test vault)
+-------------------------------------------
+    python inference/evaluate_npz.py \\
+        --data_dir  /data/ethan/PP_hecktor2026_kfold_npz \\
+        --json_list dataset_swincross_2026kfold_test.json \\
+        --output_dir /data/ethan/MedSAM2/predictions/hecktor_TEST_vault
+
+Usage - TemPoRAL manifest
+--------------------------
+    python inference/evaluate_npz.py \\
+        --data_dir  /data/ethan/MedSAM2/temporal_npz \\
+        --json_list manifest.json \\
+        --output_dir /data/ethan/MedSAM2/predictions/temporal_gt_zeroshot
 """
 
 import argparse
@@ -46,7 +68,7 @@ from scipy import ndimage
 
 warnings.filterwarnings("ignore")
 
-# ── Constants (identical to SwinCross evaluate_predictions.py) ────────────────
+# ── CSV field list (identical to SwinCross evaluate_predictions.py) ───────────
 _CLASS_INFO = {1: ("GTVp", "has_gtv_t"), 2: ("GTVn", "has_gtv_n")}
 
 CSV_FIELDS = [
@@ -77,293 +99,420 @@ CSV_FIELDS = [
 ]
 
 
-# ── Metric helpers ────────────────────────────────────────────────────────────
+# ── Metric helpers ─────────────────────────────────────────────────────────────
 
-def _safe(value, decimals=4):
-    if value is None or (isinstance(value, float) and math.isnan(value)):
+def _safe(v, d=4):
+    if v is None or (isinstance(v, float) and math.isnan(v)):
         return ""
-    return str(round(float(value), decimals))
+    return str(round(float(v), d))
 
 
-def count_objects(image_np: np.ndarray, target_value: int) -> int:
-    binary_mask = (image_np == target_value)
-    if not binary_mask.any():
+def _count_objects(arr: np.ndarray, val: int) -> int:
+    mask = (arr == val)
+    if not mask.any():
         return 0
-    structure = ndimage.generate_binary_structure(image_np.ndim, image_np.ndim)
-    _, num_features = ndimage.label(binary_mask, structure=structure)
-    return num_features
+    struct = ndimage.generate_binary_structure(arr.ndim, arr.ndim)
+    _, n   = ndimage.label(mask, structure=struct)
+    return n
 
 
-def _overlap_metrics(tp, fp, fn, tn):
-    dice         = 2.0 * tp / (2.0 * tp + fp + fn) if (2.0 * tp + fp + fn) > 0 else None
-    jaccard      = tp / (tp + fp + fn)              if (tp + fp + fn) > 0        else None
-    overlap_gt   = tp / (tp + fn)                   if (tp + fn) > 0             else None
-    overlap_pred = tp / (tp + fp)                   if (tp + fp) > 0             else None
-    return dice, jaccard, overlap_gt, overlap_pred
+def _overlap(tp, fp, fn, tn):
+    dice   = 2*tp / (2*tp+fp+fn) if (2*tp+fp+fn) > 0 else None
+    jac    = tp / (tp+fp+fn)     if (tp+fp+fn)   > 0 else None
+    ov_gt  = tp / (tp+fn)        if (tp+fn)       > 0 else None
+    ov_pr  = tp / (tp+fp)        if (tp+fp)       > 0 else None
+    return dice, jac, ov_gt, ov_pr
 
 
-def _vol_sim(va, vb):
-    return 1.0 - abs(va - vb) / (va + vb) if (va + vb) > 0 else None
+def _vol_sim(a, b):
+    return 1.0 - abs(a-b)/(a+b) if (a+b) > 0 else None
 
 
-def _hausdorff_mhd(pred_np, gt_np, cls, spacing_zyx):
-    """Compute Hausdorff and MHD in mm. spacing_zyx = (sz, sy, sx) in mm."""
-    pred_mask = (pred_np == cls).astype(np.uint8)
-    gt_mask   = (gt_np   == cls).astype(np.uint8)
-    if not pred_mask.any() or not gt_mask.any():
+def _hausdorff_mhd(pred_np, gt_np, cls, spacing_xyz):
+    """spacing_xyz must be (sx, sy, sz) in mm - SimpleITK SetSpacing convention."""
+    pm = (pred_np == cls).astype(np.uint8)
+    gm = (gt_np   == cls).astype(np.uint8)
+    if not pm.any() or not gm.any():
         return None, None
-
-    # Build SimpleITK images with physical spacing
-    # sitk stores spacing as (x, y, z); our arrays are (z, y, x)
-    sitk_spacing = (float(spacing_zyx[2]), float(spacing_zyx[1]), float(spacing_zyx[0]))
-
-    pred_bin = sitk.GetImageFromArray(pred_mask)
-    pred_bin.SetSpacing(sitk_spacing)
-    gt_bin = sitk.GetImageFromArray(gt_mask)
-    gt_bin.SetSpacing(sitk_spacing)
-
+    ps = sitk.GetImageFromArray(pm)
+    ps.SetSpacing([float(s) for s in spacing_xyz])
+    gs = sitk.GetImageFromArray(gm)
+    gs.SetSpacing([float(s) for s in spacing_xyz])
     try:
-        hd_filter = sitk.HausdorffDistanceImageFilter()
-        hd_filter.Execute(gt_bin, pred_bin)
-        return hd_filter.GetHausdorffDistance(), hd_filter.GetAverageHausdorffDistance()
+        f = sitk.HausdorffDistanceImageFilter()
+        f.Execute(gs, ps)
+        return f.GetHausdorffDistance(), f.GetAverageHausdorffDistance()
     except Exception as exc:
-        print(f"   ⚠  Hausdorff failed for class {cls}: {exc}")
+        print(f"   Hausdorff failed cls={cls}: {exc}")
         return None, None
 
 
-def _infer_gtv_flags(gt_np, case_meta):
-    meta = dict(case_meta)
+def _infer_flags(gt_np, meta):
+    m = dict(meta)
     for key, cls in (("has_gtv_t", 1), ("has_gtv_n", 2)):
-        if meta.get(key) in (None, "", "None"):
-            meta[key] = bool((gt_np == cls).any())
-    return meta
+        if m.get(key) in (None, "", "None"):
+            m[key] = bool((gt_np == cls).any())
+    return m
 
 
-def compute_rich_metrics(pred_np, gt_np, spacing_zyx, case_meta):
-    """
-    Compute all metrics for one case.
+# ── Core metric computation ────────────────────────────────────────────────────
+
+def compute_rich_metrics(pred_np: np.ndarray, gt_np: np.ndarray,
+                          spacing_xyz: tuple, case_meta: dict) -> dict:
+    """Compute all metrics for one case.
 
     Parameters
     ----------
-    pred_np     : (D, H, W) uint8  predicted labels {0,1,2}
-    gt_np       : (D, H, W) uint8  ground-truth labels {0,1,2}
-    spacing_zyx : (3,) float  voxel size in mm (z, y, x)
-    case_meta   : dict  metadata from manifest (or inferred)
+    pred_np      : (Z, Y, X) uint8 prediction  (any consistent 3-D order)
+    gt_np        : (Z, Y, X) uint8 ground truth  (same order)
+    spacing_xyz  : (sx, sy, sz) voxel size in mm - ITK convention for sitk
+    case_meta    : dict with case_id, patient, timepoint, …
     """
-    vox_mm3   = float(spacing_zyx[0]) * float(spacing_zyx[1]) * float(spacing_zyx[2])
-    case_meta = _infer_gtv_flags(gt_np, case_meta)
-    total_vox = float(pred_np.size)
-    gt_available = case_meta.get("gt_available", True)
+    vox_mm3    = float(spacing_xyz[0]) * float(spacing_xyz[1]) * float(spacing_xyz[2])
+    case_meta  = _infer_flags(gt_np, case_meta)
+    total_vox  = float(pred_np.size)
+    gt_avail   = case_meta.get("gt_available", True)
 
     row = {f: "" for f in CSV_FIELDS}
     row.update({
-        "case_id":            case_meta.get("case_id", ""),
-        "patient":            case_meta.get("patient", ""),
-        "timepoint":          case_meta.get("timepoint", ""),
+        "case_id":            case_meta.get("case_id",    ""),
+        "patient":            case_meta.get("patient",    ""),
+        "timepoint":          case_meta.get("timepoint",  ""),
         "study_date":         case_meta.get("study_date", ""),
-        "gt_available":       gt_available,
-        "gt_reason":          case_meta.get("gt_reason", "ok"),
-        "has_gtv_t":          case_meta.get("has_gtv_t", ""),
-        "has_gtv_n":          case_meta.get("has_gtv_n", ""),
-        "gt_labels_present":  ", ".join(n for c, (n, _) in _CLASS_INFO.items()
-                                         if (gt_np == c).any()) or "none",
-        "pred_labels_present": ", ".join(n for c, (n, _) in _CLASS_INFO.items()
-                                          if (pred_np == c).any()) or "none",
-        "gt_vol_total_mm3":   round(float(np.sum(gt_np > 0)) * vox_mm3, 1),
+        "gt_available":       gt_avail,
+        "gt_reason":          case_meta.get("gt_reason",  "ok"),
+        "has_gtv_t":          case_meta.get("has_gtv_t",  ""),
+        "has_gtv_n":          case_meta.get("has_gtv_n",  ""),
+        "gt_labels_present":  ", ".join(n for c,(n,_) in _CLASS_INFO.items()
+                                         if (gt_np==c).any()) or "none",
+        "pred_labels_present":  ", ".join(n for c,(n,_) in _CLASS_INFO.items()
+                                           if (pred_np==c).any()) or "none",
+        "gt_vol_total_mm3":   round(float(np.sum(gt_np   > 0)) * vox_mm3, 1),
         "pred_vol_total_mm3": round(float(np.sum(pred_np > 0)) * vox_mm3, 1),
     })
 
-    if not gt_available:
+    if not gt_avail:
         row["comments"] = "no_GT_annotation"
         return row
 
     comments, dice_vals = [], []
 
-    for cls, (cls_name, has_key) in _CLASS_INFO.items():
-        gt_mask   = (gt_np   == cls)
-        pred_mask = (pred_np == cls)
-        gt_vol    = float(gt_mask.sum())   * vox_mm3
-        pred_vol  = float(pred_mask.sum()) * vox_mm3
+    for cls, (cname, has_key) in _CLASS_INFO.items():
+        gm = (gt_np   == cls)
+        pm = (pred_np == cls)
+        gv = float(gm.sum()) * vox_mm3
+        pv = float(pm.sum()) * vox_mm3
 
-        row[f"gt_vol_{cls_name}_mm3"]   = round(gt_vol, 1)
-        row[f"pred_vol_{cls_name}_mm3"] = round(pred_vol, 1)
-        row[f"vol_sim_{cls_name}"]      = _safe(_vol_sim(gt_vol, pred_vol))
+        row[f"gt_vol_{cname}_mm3"]   = round(gv, 1)
+        row[f"pred_vol_{cname}_mm3"] = round(pv, 1)
+        row[f"vol_sim_{cname}"]      = _safe(_vol_sim(gv, pv))
+        row[f"gt_count_{cname}"]     = _count_objects(gt_np,   cls)
+        row[f"pred_count_{cname}"]   = _count_objects(pred_np, cls)
 
-        row[f"gt_count_{cls_name}"]   = count_objects(gt_np, cls)
-        row[f"pred_count_{cls_name}"] = count_objects(pred_np, cls)
-
-        tp_vox = float(np.logical_and(pred_mask, gt_mask).sum())
-        fp_vox = float(np.logical_and(pred_mask, ~gt_mask).sum())
-        fn_vox = float(np.logical_and(~pred_mask, gt_mask).sum())
-        tn_vox = total_vox - tp_vox - fp_vox - fn_vox
+        tp = float(np.logical_and(pm,  gm).sum())
+        fp = float(np.logical_and(pm, ~gm).sum())
+        fn = float(np.logical_and(~pm,  gm).sum())
+        tn = total_vox - tp - fp - fn
 
         row.update({
-            f"{cls_name}_TP_mm3": round(tp_vox * vox_mm3, 1),
-            f"{cls_name}_FP_mm3": round(fp_vox * vox_mm3, 1),
-            f"{cls_name}_FN_mm3": round(fn_vox * vox_mm3, 1),
-            f"{cls_name}_TN_mm3": round(tn_vox * vox_mm3, 1),
+            f"{cname}_TP_mm3": round(tp*vox_mm3, 1),
+            f"{cname}_FP_mm3": round(fp*vox_mm3, 1),
+            f"{cname}_FN_mm3": round(fn*vox_mm3, 1),
+            f"{cname}_TN_mm3": round(tn*vox_mm3, 1),
         })
 
         if case_meta.get(has_key) is False:
-            comments.append(f"no_{cls_name}_gt")
-            if pred_vol > 0:
-                comments.append(f"pred_{cls_name}_FP_{round(pred_vol/1000,1)}cm3")
+            comments.append(f"no_{cname}_gt")
+            if pv > 0:
+                comments.append(f"pred_{cname}_FP_{round(pv/1000,1)}cm3")
             continue
 
-        if not gt_mask.any() and not pred_mask.any():
-            comments.append(f"{cls_name}_TN")
-            continue
+        if not gm.any() and not pm.any():
+            comments.append(f"{cname}_TN"); continue
+        if not gm.any(): comments.append(f"no_{cname}_gt_voxels")
+        if not pm.any(): comments.append(f"pred_{cname}_empty")
 
-        if not gt_mask.any():
-            comments.append(f"no_{cls_name}_gt_voxels")
-        if not pred_mask.any():
-            comments.append(f"pred_{cls_name}_empty")
-
-        dice, jaccard, overlap_gt, overlap_pred = _overlap_metrics(
-            tp_vox, fp_vox, fn_vox, tn_vox)
+        dice, jac, ov_gt, ov_pr = _overlap(tp, fp, fn, tn)
         if dice is not None:
             dice_vals.append(dice)
-
         row.update({
-            f"{cls_name}_dice":         _safe(dice),
-            f"{cls_name}_jaccard":      _safe(jaccard),
-            f"{cls_name}_overlap_gt":   _safe(overlap_gt),
-            f"{cls_name}_overlap_pred": _safe(overlap_pred),
+            f"{cname}_dice":         _safe(dice),
+            f"{cname}_jaccard":      _safe(jac),
+            f"{cname}_overlap_gt":   _safe(ov_gt),
+            f"{cname}_overlap_pred": _safe(ov_pr),
         })
         if dice is not None and dice < 0.3:
-            comments.append(f"{cls_name}_low_dice_{dice:.2f}")
+            comments.append(f"{cname}_low_dice_{dice:.2f}")
 
-        hd_mm, mhd_mm = _hausdorff_mhd(pred_np, gt_np, cls, spacing_zyx)
-        row[f"{cls_name}_hausdorff_mm"] = _safe(hd_mm, 2)
-        row[f"{cls_name}_mhd_mm"]       = _safe(mhd_mm, 2)
+        hd, mhd = _hausdorff_mhd(pred_np, gt_np, cls, spacing_xyz)
+        row[f"{cname}_hausdorff_mm"] = _safe(hd,  2)
+        row[f"{cname}_mhd_mm"]       = _safe(mhd, 2)
 
     row["mean_dice"] = _safe(float(np.mean(dice_vals))) if dice_vals else ""
     row["comments"]  = "; ".join(dict.fromkeys(comments))
     return row
 
 
+# ── GT + prediction loaders ────────────────────────────────────────────────────
+
+def _load_nifti(path: str):
+    """Return (np.ndarray uint8, spacing_xyz tuple)."""
+    img = sitk.ReadImage(path)
+    return sitk.GetArrayFromImage(img).astype(np.uint8), img.GetSpacing()
+
+
+def _load_gt_swincross_npz(npz_path: str):
+    """SwinCross NPZ -> (label uint8, spacing_xyz).
+
+    label    : (R,A,S) uint8  - kept as-is; pred will be compared in same space
+    spacing  : orig_spacing (sx,sy,sz) ITK order
+    """
+    with np.load(npz_path, allow_pickle=False) as npz:
+        lbl = npz["label"].astype(np.uint8)
+        spacing_xyz = tuple(float(s) for s in npz["orig_spacing"])
+    return lbl, spacing_xyz
+
+
+def _load_gt_temporal_npz(npz_path: str):
+    """TemPoRAL NPZ -> (gts uint8, spacing_xyz).
+
+    gts      : (D,H,W) uint8
+    spacing  : stored as (sz,sy,sx) -> converted to (sx,sy,sz) for sitk
+    """
+    with np.load(npz_path, allow_pickle=False) as npz:
+        gts = npz["gts"].astype(np.uint8)
+        sz, sy, sx = npz["spacing"]
+    return gts, (float(sx), float(sy), float(sz))
+
+
+def _load_gt_auto(path: str):
+    """Auto-detect GT source (NIfTI or NPZ, SwinCross or TemPoRAL)."""
+    if path.endswith(".nii.gz") or path.endswith(".nii"):
+        return _load_nifti(path)
+    # NPZ - detect by keys
+    with np.load(path, allow_pickle=False) as npz:
+        keys = set(npz.files)
+    if "label" in keys:
+        return _load_gt_swincross_npz(path)
+    if "gts" in keys:
+        return _load_gt_temporal_npz(path)
+    raise ValueError(f"Cannot determine GT format from {path}. Keys: {keys}")
+
+
+def _load_pred_nifti(path: str):
+    """Load prediction NIfTI -> (uint8, spacing_xyz)."""
+    return _load_nifti(path)
+
+
+def _resample_pred_to_gt(pred_sitk: sitk.Image,
+                          gt_sitk:   sitk.Image) -> sitk.Image:
+    r = sitk.ResampleImageFilter()
+    r.SetReferenceImage(gt_sitk)
+    r.SetInterpolator(sitk.sitkNearestNeighbor)
+    r.SetTransform(sitk.Transform())
+    r.SetOutputPixelType(sitk.sitkUInt8)
+    return r.Execute(pred_sitk)
+
+
+# ── Entry building ─────────────────────────────────────────────────────────────
+
+def _build_entries(args) -> list:
+    """Return list of dicts: {case_id, pred_nifti, gt_path, meta}."""
+    entries = []
+
+    if args.json_list:
+        data_dir  = args.data_dir or "."
+        json_path = (join(data_dir, args.json_list)
+                     if not os.path.isabs(args.json_list) else args.json_list)
+        with open(json_path) as f:
+            js = json.load(f)
+
+        # ── TemPoRAL manifest.json ─────────────────────────────────────
+        if "cases" in js:
+            for e in js["cases"]:
+                case_id = e.get("case_id", "")
+                entries.append({
+                    "case_id":   case_id,
+                    "pred_nifti": join(args.output_dir, f"{case_id}_Pred.nii.gz"),
+                    "gt_path":   join(data_dir, e.get("npz_file", "")),
+                    "meta":      dict(e, gt_available=e.get("gt_available", True)),
+                })
+            return entries
+
+        # ── SwinCross JSON ─────────────────────────────────────────────
+        all_entries = []
+        for key in ("validation", "training", "testing"):
+            all_entries.extend(js.get(key, []))
+
+        for e in all_entries:
+            case_id = (e.get("case_id")
+                       or basename(e.get("npz", "unknown")).replace(".npz", ""))
+            # GT: prefer the NIfTI path stored in the JSON entry
+            gt_path = None
+            if e.get("label"):
+                gt_path = join(data_dir, e["label"])
+            elif e.get("npz"):
+                gt_path = join(data_dir, e["npz"])
+
+            entries.append({
+                "case_id":    case_id,
+                "pred_nifti": join(args.output_dir, f"{case_id}_Pred.nii.gz"),
+                "gt_path":    gt_path,
+                "meta":       dict(e, case_id=case_id,
+                                   gt_available=e.get("gt_available", True)),
+            })
+        return entries
+
+    # ── Legacy --pred_dir + --gt_dir ──────────────────────────────────
+    pred_files = sorted(glob(join(args.pred_dir, "*_Pred.nii.gz")))
+    if not pred_files:
+        pred_files = sorted(glob(join(args.pred_dir, "*.nii.gz")))
+
+    # Load manifest for temporal metadata if present
+    extra_meta: dict = {}
+    if args.manifest and os.path.exists(args.manifest):
+        with open(args.manifest) as f:
+            mf = json.load(f)
+        for c in mf.get("cases", []):
+            extra_meta[c["case_id"]] = c
+
+    for pf in pred_files:
+        case_id = (basename(pf)
+                   .replace("_Pred.nii.gz", "")
+                   .replace(".nii.gz", ""))
+        # Try GT as NIfTI first, then NPZ
+        gt_nifti = join(args.gt_dir, f"{case_id}_gt.nii.gz")
+        gt_npz   = join(args.gt_dir, f"{case_id}.npz")
+        gt_path  = gt_nifti if os.path.exists(gt_nifti) else gt_npz
+
+        meta = {"case_id": case_id, "gt_available": True}
+        meta.update(extra_meta.get(case_id, {}))
+
+        entries.append({
+            "case_id":    case_id,
+            "pred_nifti": pf,
+            "gt_path":    gt_path,
+            "meta":       meta,
+        })
+    return entries
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Universal rich evaluation for MedSAM2 NPZ predictions")
-    parser.add_argument("--pred_dir",   required=True, help="Directory with predicted NPZ files (key: 'segs')")
-    parser.add_argument("--gt_dir",     required=True, help="Directory with GT NPZ files (key: 'gts', 'spacing')")
-    parser.add_argument("--manifest",   default=None,  help="Path to manifest.json (optional; inferred when absent)")
-    parser.add_argument("--output_dir", required=True, help="Directory to write per_case_evaluation_rich.csv")
+    parser = argparse.ArgumentParser(
+        description="Universal rich evaluation for MedSAM2 - HECKTOR 2026 + TemPoRAL"
+    )
+    # JSON / manifest mode
+    parser.add_argument("--data_dir",   default=None)
+    parser.add_argument("--json_list",  default=None,
+                        help="SwinCross JSON filename OR 'manifest.json'.")
+    # Legacy directory mode
+    parser.add_argument("--pred_dir",   default=None)
+    parser.add_argument("--gt_dir",     default=None)
+    parser.add_argument("--manifest",   default=None,
+                        help="[Legacy] Path to manifest.json for temporal metadata.")
+    # Output
+    parser.add_argument("--output_dir", required=True)
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
     csv_path = join(args.output_dir, "per_case_evaluation_rich.csv")
 
-    # ── Load manifest ──────────────────────────────────────────────────────────
-    manifest_path = args.manifest or join(args.gt_dir, "manifest.json")
-    meta_by_id = {}
-    if os.path.exists(manifest_path):
-        with open(manifest_path) as f:
-            manifest = json.load(f)
-        for entry in manifest.get("cases", []):
-            meta_by_id[entry["case_id"]] = entry
-        print(f"Loaded manifest: {len(meta_by_id)} cases from {manifest_path}")
-    else:
-        print("No manifest found — metadata will be inferred from GT content.")
+    all_entries = _build_entries(args)
+    if not all_entries:
+        print("No entries found. Check --data_dir / --json_list or --pred_dir.")
+        return
 
-    # ── Discover predictions ───────────────────────────────────────────────────
-    pred_files = sorted(glob(join(args.pred_dir, "*.npz")))
-    if not pred_files:
-        raise FileNotFoundError(f"No prediction NPZ files in {args.pred_dir}")
-
-    all_rows  = []
     first_write = True
+    all_rows    = []
 
-    for idx, pred_path in enumerate(pred_files):
-        case_id  = basename(pred_path).replace(".npz", "")
-        gt_path  = join(args.gt_dir, basename(pred_path))
-        print(f"\n[{idx+1}/{len(pred_files)}] Evaluating: {case_id}")
+    for idx, entry in enumerate(all_entries):
+        case_id = entry["case_id"]
+        meta    = entry.get("meta", {"case_id": case_id, "gt_available": True})
+        meta.setdefault("case_id",      case_id)
+        meta.setdefault("gt_available", True)
 
-        if not os.path.exists(gt_path):
-            print("  ❌ GT file not found — skipping.")
+        print(f"\n[{idx+1}/{len(all_entries)}] {case_id}")
+
+        # ── Load prediction ───────────────────────────────────────────
+        pred_nifti = entry.get("pred_nifti", "")
+        if not pred_nifti or not os.path.exists(pred_nifti):
+            print("  Prediction NIfTI not found - skipping.")
             continue
+        pred_np, pred_spacing = _load_pred_nifti(pred_nifti)
 
-        pred_data = np.load(pred_path, allow_pickle=True)
-        gt_data   = np.load(gt_path,   allow_pickle=True)
-        pred_np   = pred_data["segs"].astype(np.uint8)
-        gt_np     = gt_data["gts"].astype(np.uint8)
-        spacing   = gt_data["spacing"]   # (z, y, x) mm
+        # ── Load ground truth ─────────────────────────────────────────
+        gt_path = entry.get("gt_path", "")
+        if not gt_path or not os.path.exists(gt_path):
+            print("  Ground truth not found - skipping.")
+            continue
+        gt_np, gt_spacing = _load_gt_auto(gt_path)
 
-        # ── Build case metadata ────────────────────────────────────────────────
-        if case_id in meta_by_id:
-            case_meta = dict(meta_by_id[case_id])
-        else:
-            # No manifest — infer flags from GT content
-            case_meta = {
-                "case_id":      case_id,
-                "patient":      case_id,
-                "timepoint":    "",
-                "study_date":   "",
-                "gt_available": True,
-                "gt_reason":    "ok",
-                "has_gtv_t":    None,   # will be inferred inside compute_rich_metrics
-                "has_gtv_n":    None,
-            }
+        # Use GT spacing as the reference (prediction was written in GT space)
+        spacing_xyz = gt_spacing
 
-        # ── Handle shape mismatch ──────────────────────────────────────────────
+        # ── Shape alignment ───────────────────────────────────────────
         if pred_np.shape != gt_np.shape:
-            print(f"  ⚠  Shape mismatch pred={pred_np.shape} gt={gt_np.shape} — resampling pred.")
-            # Use SimpleITK to resample
-            pred_sitk = sitk.GetImageFromArray(pred_np)
-            gt_sitk   = sitk.GetImageFromArray(gt_np)
-            sp = (float(spacing[2]), float(spacing[1]), float(spacing[0]))
-            pred_sitk.SetSpacing(sp); gt_sitk.SetSpacing(sp)
-            r = sitk.ResampleImageFilter()
-            r.SetReferenceImage(gt_sitk)
-            r.SetInterpolator(sitk.sitkNearestNeighbor)
-            r.SetTransform(sitk.Transform())
-            r.SetOutputPixelType(sitk.sitkUInt8)
-            pred_np = sitk.GetArrayFromImage(r.Execute(pred_sitk)).astype(np.uint8)
+            print(f"  ⚠  Shape mismatch pred={pred_np.shape} gt={gt_np.shape} - resampling.")
+            p_sitk = sitk.GetImageFromArray(pred_np)
+            p_sitk.SetSpacing([float(s) for s in spacing_xyz])
+            g_sitk = sitk.GetImageFromArray(gt_np)
+            g_sitk.SetSpacing([float(s) for s in spacing_xyz])
+            pred_np = sitk.GetArrayFromImage(
+                _resample_pred_to_gt(p_sitk, g_sitk)).astype(np.uint8)
 
-        # ── Skip no-GT cases ───────────────────────────────────────────────────
-        if not case_meta.get("gt_available", True):
-            print("  ℹ No GT available — skipping metric calculation.")
+        # ── Skip no-GT cases ──────────────────────────────────────────
+        if not meta.get("gt_available", True):
+            print("  No GT - skipping metrics.")
             row = {f: "" for f in CSV_FIELDS}
             row.update({"case_id": case_id, "comments": "no_GT_annotation"})
         else:
-            row = compute_rich_metrics(pred_np, gt_np, spacing, case_meta)
+            row = compute_rich_metrics(pred_np, gt_np, spacing_xyz, meta)
             print(
                 f"  GTVp  Dice={row.get('GTVp_dice','NA')}  "
                 f"Jac={row.get('GTVp_jaccard','NA')}  "
-                f"HD={row.get('GTVp_hausdorff_mm','NA')}mm  "
-                f"MHD={row.get('GTVp_mhd_mm','NA')}mm  "
-                f"OvGT={row.get('GTVp_overlap_gt','NA')}  "
-                f"OvPred={row.get('GTVp_overlap_pred','NA')}"
+                f"HD={row.get('GTVp_hausdorff_mm','NA')}mm"
             )
             print(
                 f"  GTVn  Dice={row.get('GTVn_dice','NA')}  "
                 f"Jac={row.get('GTVn_jaccard','NA')}  "
-                f"HD={row.get('GTVn_hausdorff_mm','NA')}mm  "
-                f"MHD={row.get('GTVn_mhd_mm','NA')}mm  "
-                f"OvGT={row.get('GTVn_overlap_gt','NA')}  "
-                f"OvPred={row.get('GTVn_overlap_pred','NA')}"
+                f"HD={row.get('GTVn_hausdorff_mm','NA')}mm"
             )
-            print(f"  Mean Dice={row.get('mean_dice','NA')}  "
-                  f"Obj(GT/Pred) T:[{row.get('gt_count_GTVp')}/{row.get('pred_count_GTVp')}] "
-                  f"N:[{row.get('gt_count_GTVn')}/{row.get('pred_count_GTVn')}]")
+            print(f"  Mean Dice={row.get('mean_dice','NA')}")
 
         all_rows.append(row)
 
         with open(csv_path, "w" if first_write else "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
+            w = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
             if first_write:
-                writer.writeheader()
-            writer.writerow(row)
+                w.writeheader()
+            w.writerow(row)
         first_write = False
+
+    # ── MEAN row ──────────────────────────────────────────────────────
+    try:
+        import pandas as pd
+        df = pd.read_csv(csv_path)
+        num_cols  = df.select_dtypes(include=["float64", "int64"]).columns
+        mean_vals = df[num_cols].mean().round(4).to_dict()
+        mean_row  = {f: "" for f in CSV_FIELDS}
+        mean_row.update(mean_vals)
+        mean_row["case_id"] = "MEAN"
+        mean_row["patient"] = "ALL_CASES"
+        mean_row["comments"] = f"Average across {len(df)} cases"
+        pd.DataFrame([mean_row]).to_csv(csv_path, mode="a", header=False, index=False)
+        print(f"\nAppended MEAN row ({len(df)} cases).")
+    except ImportError:
+        print("\nPandas not installed - skipping MEAN row.")
 
     mean_dices = [float(r["mean_dice"]) for r in all_rows if r.get("mean_dice")]
     print("\n" + "=" * 60)
     if mean_dices:
-        print(f"Overall Mean Dice : {np.mean(mean_dices):.4f}  (n={len(mean_dices)})")
+        print(f"Overall Mean Dice: {np.mean(mean_dices):.4f}  (n={len(mean_dices)})")
     else:
-        print("No valid cases evaluated.")
-    print(f"Rich CSV written to: {csv_path}")
+        print("No valid cases with GT evaluated.")
+    print(f"CSV -> {csv_path}")
     print("=" * 60)
 
 
