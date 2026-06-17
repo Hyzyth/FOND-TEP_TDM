@@ -6,8 +6,8 @@
 set -e
 
 # ── 1. Configuration ───────────────────────────────────────────────────────
-GPU=1
-INFER_BATCH=16
+GPU=0
+INFER_BATCH=32
 IMG_SIZE=256
 N_FILTERS=16
 WAVELET="haar"

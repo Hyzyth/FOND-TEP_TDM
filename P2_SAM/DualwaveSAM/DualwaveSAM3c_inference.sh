@@ -23,8 +23,8 @@ set -e
 # ╚════════════════════════════════════════════════════════════════════════╝
 # ── 1. Execution Toggles (false = skip) ────────────────────────────────────
 SKIP_TEST_RUN=true
-SKIP_CLASSIC_TEST=true
-SKIP_CLASSIC_TRAIN=true
+SKIP_CLASSIC_TEST=false
+SKIP_CLASSIC_TRAIN=false
 SKIP_CLASSIC_VAL=false
 
 SKIP_KFOLD_TEST=true
@@ -32,8 +32,8 @@ SKIP_KFOLD_TRAIN=true
 SKIP_KFOLD_VAL=true
 
 # ── 2. Hardware & Inference Parameters ────────────────────────────────────
-GPU=1
-INFER_BATCH=16          # Slices per GPU forward pass (2D - can be large)
+GPU=0
+INFER_BATCH=32          # Slices per GPU forward pass (2D - can be large)
 
 # ── 3. Data Paths & JSONs ──────────────────────────────────────────────────
 HECKTOR_DATA="/data/ethan/PP_hecktor2026_kfold_npz"
