@@ -5,42 +5,33 @@ AutoPrompter: unified interface for automatic bounding-box prompt generation.
 
 Methods
 -------
-  pet      – PET thresholding only (fast, high recall)
-  unet     – Small3DUNet proposal network only
-  hybrid   – PET ∪ UNet filtered by 3-D IoU overlap (recommended)
+  pet      - PET thresholding only (fast, high recall)
+  unet     - Small3DUNet proposal network only
+  hybrid   - PET U UNet filtered by 3-D IoU overlap (recommended)
 
 PET thresholding strategies (--pet_method)
 ------------------------------------------
-  base41   – 41 % SUVmax        (best Dice, no SUV needed)
-  nestle   – alpha * I0.7 + Ibgd (best precision, needs raw SUV)
-  black    – iterative SUVmean   (high recall,   needs raw SUV)
-  daisne   – iterative contrast  (highest recall, needs raw SUV)
+  base41   - 41 % SUVmax        (scale-invariant, no SUV needed)
+  nestle   - alpha * I0.7 + Ibgd (requires raw SUV)
+  black    - iterative SUVmean   (requires raw SUV)
+  daisne   - iterative contrast  (requires raw SUV)
 
-Padding convention
-------------------
-  slice_pad  – padding added along the axial (Z / slice) axis, in slices.
-               This is intentionally smaller than planar_pad because one
-               Z slice corresponds to a whole MRI/PET frame — too much Z
-               padding wastes propagation budget.  Default: 1.
-  planar_pad – padding added along the Y and X axes, in voxels.
-               Default: 5.
+UPDATED: get_proposals() now accepts ``pet_suv_volume`` — a (D,H,W) float32
+array of raw SUV values taken directly from the SwinCross NPZ ``pet`` key.
+When provided, the uint8->SUV reconstruction step in pet_proposal.py is
+skipped entirely, preserving the full dynamic range.
 
-Output format  (matches infer_hecktor.py expectations)
--------------------------------------------------------
-{
-    1: [   # GTVp – largest candidate
-        {"component_id": 1, "voxel_count": int,
-         "z_mid": int, "bbox_2d": np.ndarray([x0, y0, x1, y1])}
-    ],
-    2: [   # GTVn – all remaining candidates
-        {"component_id": 1, ...},
-        ...
-    ]
-}
+Path summary
+------------
+  SwinCross NPZ  ->  pet_suv_volume = npz["pet"].astype(float32)
+                    suv_max        = None
+                    -> nestle/black/daisne use pet_suv_volume directly
 
-Label assignment heuristic (in the absence of GT):
-  Largest proposal (by voxel_count) → GTVp (label 1)
-  All remaining proposals           → GTVn (label 2)
+  TemPoRAL NPZ   ->  pet_suv_volume = None
+                    suv_max        = meta["pet_suv_max"]  (as before)
+                    -> nestle/black/daisne use reconstruct_suv(pet_uint8, suv_max)
+
+  base41         ->  neither needed (scale-invariant on uint8)
 """
 
 from __future__ import annotations
@@ -57,9 +48,8 @@ from auto_prompting.box_utils import iou_3d, nms_3d
 
 logger = logging.getLogger(__name__)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Helper: run proposal net on a full volume
-# ──────────────────────────────────────────────────────────────────────────────
+
+# ── UNet proposals ─────────────────────────────────────────────────────────────
 
 def _unet_proposals(ct_uint8: np.ndarray,
                     pet_uint8: np.ndarray,
@@ -75,16 +65,14 @@ def _unet_proposals(ct_uint8: np.ndarray,
 
     x = torch.tensor(np.stack([ct, pet], axis=0)).unsqueeze(0).float().to(device)
 
-    # --- FIX: Pad to multiple of 16 ---
     _, _, D, H, W = x.shape
-    pad_d = (16 - (D % 16)) % 16
-    pad_h = (16 - (H % 16)) % 16
-    pad_w = (16 - (W % 16)) % 16
+    pad_d = (16 - D % 16) % 16
+    pad_h = (16 - H % 16) % 16
+    pad_w = (16 - W % 16) % 16
     x = F.pad(x, (0, pad_w, 0, pad_h, 0, pad_d))
 
     model.eval()
     with torch.no_grad():
-        # Run model and crop back to original (D, H, W)
         prob = model(x)[0, 0, :D, :H, :W].cpu().numpy()
 
     binary = prob > threshold
@@ -96,19 +84,12 @@ def _unet_proposals(ct_uint8: np.ndarray,
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Hybrid filtering
-# ──────────────────────────────────────────────────────────────────────────────
+# ── Hybrid filtering ───────────────────────────────────────────────────────────
 
 def _hybrid_filter(pet_props: list[dict],
                    unet_props: list[dict],
                    iou_threshold: float = 0.05) -> list[dict]:
-    """Keep PET proposals that overlap with at least one UNet proposal.
-
-    Falls back gracefully:
-    - No UNet proposals     → return PET proposals unfiltered (no filtering signal)
-    - No PET-UNet overlaps  → return UNet proposals alone
-    """
+    """Keep PET proposals that overlap with at least one UNet proposal."""
     if not unet_props:
         logger.warning("UNet produced no proposals; returning PET proposals unfiltered.")
         return pet_props
@@ -129,42 +110,27 @@ def _hybrid_filter(pet_props: list[dict],
     return filtered
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Label assignment
-# ──────────────────────────────────────────────────────────────────────────────
+# ── Label assignment ───────────────────────────────────────────────────────────
 
 def _assign_labels(proposals: list[dict]) -> dict[int, list[dict]]:
-    """Assign GTVp (1) to the largest candidate, GTVn (2) to the rest.
+    """Largest candidate -> GTVp (1), rest -> GTVn (2).
 
-    Edge cases
-    ----------
-    Some patients have only GTVp (labels 0,1), some only GTVn (labels 0,2),
-    most have both.  We cannot distinguish at auto-prompting time, so:
-
-    * Multiple proposals → largest = GTVp, rest = GTVn  (standard heuristic).
-    * Single proposal   → assigned to BOTH GTVp and GTVn.
-      This avoids a hard miss for GTVn-only patients at essentially zero cost
-      for GTVp-only patients: evaluate_hecktor.py returns NaN (excluded from
-      the mean) whenever the GT for a label is entirely absent.
+    Single proposal -> assigned to both (cannot distinguish GTVp-only from
+    GTVn-only at auto-prompting time; evaluate_predictions.py excludes absent
+    labels via NaN so a spurious empty prediction costs nothing).
     """
     if not proposals:
         return {}
-
     result: dict[int, list[dict]] = {1: [{**proposals[0], "component_id": 1}]}
-
     if len(proposals) == 1:
-        # Cannot tell GTVp-only from GTVn-only → predict both from the same blob.
         result[2] = [{**proposals[0], "component_id": 1}]
     else:
         result[2] = [{**p, "component_id": i}
                      for i, p in enumerate(proposals[1:], start=1)]
-
     return result
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# AutoPrompter
-# ──────────────────────────────────────────────────────────────────────────────
+# ── AutoPrompter ───────────────────────────────────────────────────────────────
 
 class AutoPrompter:
     """Generate automatic bounding-box prompts from CT + PET volumes.
@@ -173,16 +139,14 @@ class AutoPrompter:
     ----------
     method          : 'pet' | 'unet' | 'hybrid'
     model_path      : path to Small3DUNet checkpoint (.pt)
-                      Required for 'unet' and 'hybrid'.
     pet_method      : PET thresholding strategy
-                      'base41' | 'nestle' | 'black' | 'daisne'
     device          : 'cuda' | 'cpu'
-    prob_threshold  : UNet probability threshold (default 0.25)
-    iou_threshold   : minimum IoU for hybrid filtering (default 0.05)
-    min_volume      : minimum component size in voxels (default 50)
-    nms_threshold   : 3-D NMS IoU threshold (default 0.3)
-    slice_pad       : Z-axis bounding-box padding in slices (default 1)
-    planar_pad      : Y/X bounding-box padding in voxels (default 5)
+    prob_threshold  : UNet probability threshold
+    iou_threshold   : minimum IoU for hybrid PETxUNet filtering
+    min_volume      : minimum component size in voxels
+    nms_threshold   : 3-D NMS IoU threshold
+    slice_pad       : Z-axis bounding-box padding in slices
+    planar_pad      : Y/X bounding-box padding in voxels
     """
 
     def __init__(self,
@@ -223,39 +187,40 @@ class AutoPrompter:
         logger.info("Loading proposal network from %s", path)
         self.model = Small3DUNet.load(path, device=self.device)
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Main interface
-    # ──────────────────────────────────────────────────────────────────────
+    # ── Main interface ─────────────────────────────────────────────────────────
 
     def get_proposals(self,
                       ct_uint8: np.ndarray,
                       pet_uint8: np.ndarray,
                       suv_max: Optional[float] = None,
-                      max_proposals: int = 10) -> dict[int, list[dict]]:
+                      max_proposals: int = 10,
+                      pet_suv_volume: Optional[np.ndarray] = None,
+                      ) -> dict[int, list[dict]]:
         """Return a label-keyed dict of candidate proposals.
 
         Parameters
         ----------
-        ct_uint8     : (D, H, W) uint8 CT array (from NPZ)
-        pet_uint8    : (D, H, W) uint8 PET array (from NPZ)
-        suv_max      : per-patient SUV scaling factor (NPZ key 'pet_suv_max').
-                       Required for 'nestle', 'black', and 'daisne'.
-        max_proposals: cap on total proposals after NMS (default 10)
-
-        Returns
-        -------
-        {label_id: [component_dict, ...]}
+        ct_uint8       : (D, H, W) uint8 CT array
+        pet_uint8      : (D, H, W) uint8 PET array (normalised to [0, 255])
+        suv_max        : per-patient SUV ceiling for TemPoRAL reconstruct_suv().
+                         Ignored when ``pet_suv_volume`` is provided.
+        max_proposals  : cap on total proposals after NMS
+        pet_suv_volume : (D, H, W) float32 raw SUV array from SwinCross NPZ
+                         ``pet`` key.  When provided, nestle/black/daisne use
+                         this directly instead of reconstructing from uint8.
+                         For base41 this parameter is unused.
         """
         pet_props = unet_props = []
 
         if self.method in ("pet", "hybrid"):
             pet_props = get_pet_proposals(
-                pet_uint8  = pet_uint8,
-                suv_max    = suv_max,
-                method     = self.pet_method,
-                min_volume = self.min_volume,
-                slice_pad  = self.slice_pad,
-                planar_pad = self.planar_pad,
+                pet_uint8   = pet_uint8,
+                suv_max     = suv_max,
+                method      = self.pet_method,
+                min_volume  = self.min_volume,
+                slice_pad   = self.slice_pad,
+                planar_pad  = self.planar_pad,
+                pet_suv     = pet_suv_volume,   # None for TemPoRAL, float32 for SwinCross
             )
             logger.debug("PET proposals (before NMS): %d", len(pet_props))
 
@@ -276,16 +241,15 @@ class AutoPrompter:
             raw = pet_props
         elif self.method == "unet":
             raw = unet_props
-        else:  # hybrid
+        else:
             raw = _hybrid_filter(pet_props, unet_props, self.iou_threshold)
 
-        # NMS then cap
         proposals = nms_3d(raw, iou_threshold=self.nms_threshold)[:max_proposals]
         for i, p in enumerate(proposals, start=1):
             p["component_id"] = i
 
         result = _assign_labels(proposals)
-        logger.info("Auto-prompts → GTVp: %d, GTVn: %d",
+        logger.info("Auto-prompts -> GTVp: %d, GTVn: %d",
                     len(result.get(1, [])), len(result.get(2, [])))
         return result
 
