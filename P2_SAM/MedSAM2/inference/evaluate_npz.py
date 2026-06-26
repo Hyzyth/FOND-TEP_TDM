@@ -256,9 +256,9 @@ def compute_rich_metrics(pred_np: np.ndarray, gt_np: np.ndarray,
 # ── GT + prediction loaders ────────────────────────────────────────────────────
 
 def _load_nifti(path: str):
-    """Return (np.ndarray uint8, spacing_xyz tuple)."""
+    """Return (np.ndarray uint8, spacing_xyz tuple, sitk.Image)."""
     img = sitk.ReadImage(path)
-    return sitk.GetArrayFromImage(img).astype(np.uint8), img.GetSpacing()
+    return sitk.GetArrayFromImage(img).astype(np.uint8), img.GetSpacing(), img
 
 
 def _load_gt_swincross_npz(npz_path: str):
@@ -293,14 +293,16 @@ def _load_gt_auto(path: str):
     with np.load(path, allow_pickle=False) as npz:
         keys = set(npz.files)
     if "label" in keys:
-        return _load_gt_swincross_npz(path)
+        arr, sp = _load_gt_swincross_npz(path)
+        return arr, sp, None
     if "gts" in keys:
-        return _load_gt_temporal_npz(path)
+        arr, sp = _load_gt_temporal_npz(path)
+        return arr, sp, None
     raise ValueError(f"Cannot determine GT format from {path}. Keys: {keys}")
 
 
 def _load_pred_nifti(path: str):
-    """Load prediction NIfTI -> (uint8, spacing_xyz)."""
+    """Load prediction NIfTI -> (uint8, spacing_xyz, sitk.Image)."""
     return _load_nifti(path)
 
 
@@ -440,14 +442,14 @@ def main():
         if not pred_nifti or not os.path.exists(pred_nifti):
             print("  Prediction NIfTI not found - skipping.")
             continue
-        pred_np, pred_spacing = _load_pred_nifti(pred_nifti)
+        pred_np, pred_spacing, pred_img = _load_pred_nifti(pred_nifti)
 
         # ── Load ground truth ─────────────────────────────────────────
         gt_path = entry.get("gt_path", "")
         if not gt_path or not os.path.exists(gt_path):
             print("  Ground truth not found - skipping.")
             continue
-        gt_np, gt_spacing = _load_gt_auto(gt_path)
+        gt_np, gt_spacing, gt_img = _load_gt_auto(gt_path)
 
         # Use GT spacing as the reference (prediction was written in GT space)
         spacing_xyz = gt_spacing
@@ -455,12 +457,10 @@ def main():
         # ── Shape alignment ───────────────────────────────────────────
         if pred_np.shape != gt_np.shape:
             print(f"  ⚠  Shape mismatch pred={pred_np.shape} gt={gt_np.shape} - resampling.")
-            p_sitk = sitk.GetImageFromArray(pred_np)
-            p_sitk.SetSpacing([float(s) for s in spacing_xyz])
-            g_sitk = sitk.GetImageFromArray(gt_np)
-            g_sitk.SetSpacing([float(s) for s in spacing_xyz])
-            pred_np = sitk.GetArrayFromImage(
-                _resample_pred_to_gt(p_sitk, g_sitk)).astype(np.uint8)
+            if pred_img is not None and gt_img is not None:
+                pred_np = sitk.GetArrayFromImage(_resample_pred_to_gt(pred_img, gt_img)).astype(np.uint8)
+            else:
+                raise ValueError("Shape mismatch but missing Origin/Direction metadata to resample correctly! Ensure GT is loaded from NIfTI, not NPZ.")
 
         # ── Skip no-GT cases ──────────────────────────────────────────
         if not meta.get("gt_available", True):

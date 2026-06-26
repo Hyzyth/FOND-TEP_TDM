@@ -42,8 +42,8 @@ import SimpleITK as sitk
 DEFAULT_INPUT  = "/data/santiago/Database_nifti_TEMPORAL"
 DEFAULT_OUTPUT = "/data/ethan/MedSAM2/temporal_npz"
 
-CT_WINDOW_LOW  = -200   # HU
-CT_WINDOW_HIGH =  800   # HU
+CT_WINDOW_LOW  = -160   # HU
+CT_WINDOW_HIGH =  240   # HU
 
 # ── Timepoint normalisation map ───────────────────────────────────────────────
 TIMEPOINT_MAP = {
@@ -235,9 +235,16 @@ def process_case(ct_path: str, pet_path: str,
     ct_imgs  = window_ct(ct_np, args.ct_low, args.ct_high)
     pet_imgs, suv_max = normalise_pet(pet_np)
 
+    z_min = 0
+    d_orig = ct_imgs.shape[0]
     if not args.no_crop and gt_available and mask_np.any():
-        ct_imgs, pet_imgs, mask_np = crop_to_foreground(ct_imgs, pet_imgs, mask_np,
-                                                         margin_z=args.crop_margin)
+        labelled = np.where(mask_np.sum(axis=(1, 2)) > 0)[0]
+        if len(labelled) > 0:
+            z_min = max(0, labelled[0] - args.crop_margin)
+            z_max = min(ct_imgs.shape[0], labelled[-1] + args.crop_margin + 1)
+            ct_imgs = ct_imgs[z_min:z_max]
+            pet_imgs = pet_imgs[z_min:z_max]
+            mask_np = mask_np[z_min:z_max]
 
     return {
         "ct_imgs":     ct_imgs,
@@ -245,6 +252,10 @@ def process_case(ct_path: str, pet_path: str,
         "gts":         mask_np,
         "spacing":     spacing_zyx,
         "pet_suv_max": np.float32(suv_max),
+        "z_min":       z_min,
+        "d_orig":      d_orig,
+        "origin":      np.array(ct_sitk.GetOrigin(), dtype=np.float64),
+        "direction":   np.array(ct_sitk.GetDirection(), dtype=np.float64)
     }
 
 
@@ -357,10 +368,14 @@ def main():
                             gts         = result["gts"],
                             spacing     = result["spacing"],
                             pet_suv_max = result["pet_suv_max"],
+                            z_min       = result["z_min"],
+                            d_orig      = result["d_orig"],
+                            origin      = result["origin"],
+                            direction   = result["direction"]
                         )
                     except Exception as e:
                         skipped += 1
-                        print(f"  ❌ Error on {case_id}: {e}")
+                        print(f"  Error on {case_id}: {e}")
                         continue
 
                 manifest["cases"].append({

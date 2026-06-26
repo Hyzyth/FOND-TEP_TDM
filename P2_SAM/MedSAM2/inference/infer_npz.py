@@ -209,7 +209,14 @@ def _load_temporal(path: str) -> dict:
         pet_raw_suv = None   # base41 still works; nestle/black/daisne will warn
 
     D, H, W = ct_f.shape
-    meta = {"spacing": spacing, "pet_suv_max": suv_max}
+    meta = {
+        "spacing": spacing, 
+        "pet_suv_max": suv_max,
+        "z_min": int(npz.get("z_min", 0)),
+        "d_orig": int(npz.get("d_orig", D)),
+        "origin": npz.get("origin"),
+        "direction": npz.get("direction")
+    }
 
     # spacing_mm in (sz,sy,sx) order - used directly for 3-D post-processing
     # because the array axes are (D,H,W) = (z,y,x) in sitk convention
@@ -255,14 +262,23 @@ def _nifti_swincross(pred_sra: np.ndarray, meta: dict,
     sitk.WriteImage(r.Execute(sitk_img), out_path)
 
 
-def _nifti_temporal(pred_dhw: np.ndarray, spacing_mm: tuple, out_path: str):
-    """TemPoRAL: (D,H,W) pred -> NIfTI with stored (sz,sy,sx) spacing.
-
-    SimpleITK SetSpacing expects (sx,sy,sz); spacing_mm is (sz,sy,sx) -> reverse.
-    """
+def _nifti_temporal(pred_dhw: np.ndarray, spacing_mm: tuple, out_path: str, meta: dict):
     sz, sy, sx = spacing_mm
-    sitk_img = sitk.GetImageFromArray(pred_dhw.astype(np.uint8))
+    d_orig = meta.get("d_orig", pred_dhw.shape[0])
+    z_min = meta.get("z_min", 0)
+
+    # Uncrop along depth (Z) axis
+    full = np.zeros((d_orig, pred_dhw.shape[1], pred_dhw.shape[2]), dtype=np.uint8)
+    full[z_min:z_min+pred_dhw.shape[0]] = pred_dhw
+
+    sitk_img = sitk.GetImageFromArray(full)
     sitk_img.SetSpacing((float(sx), float(sy), float(sz)))
+    
+    if meta.get("origin") is not None:
+        sitk_img.SetOrigin([float(x) for x in meta["origin"]])
+    if meta.get("direction") is not None:
+        sitk_img.SetDirection([float(x) for x in meta["direction"]])
+
     sitk.WriteImage(sitk_img, out_path)
 
 
@@ -501,7 +517,7 @@ def infer_one_case(npz_path: str, entry: dict, predictor,
     if fmt == "swincross":
         _nifti_swincross(segs, meta, spacing_mm, nifti_path)
     else:
-        _nifti_temporal(segs, spacing_mm, nifti_path)
+        _nifti_temporal(segs, spacing_mm, nifti_path, meta)
     print(f"  NIfTI: {nifti_path}")
 
     # NPZ pred for evaluate_npz.py

@@ -47,8 +47,8 @@ SKIP_PET=1              # PET auto-prompting - test vault
 SKIP_UNET=1             # UNet auto-prompting - test vault
 SKIP_HYBRID=1           # Hybrid auto-prompting - test vault
 
-SKIP_TEMPORAL=0         # TemPoRAL zero-shot inference
-SKIP_TP_STRAT=0         # Per-timepoint sub-reports for TemPoRAL
+SKIP_TEMPORAL=1         # TemPoRAL zero-shot inference
+SKIP_TP_STRAT=1         # Per-timepoint sub-reports for TemPoRAL
 
 # ── 2. Hardware & Paths ────────────────────────────────────────────────────
 GPU=0
@@ -101,7 +101,7 @@ fi
 
 # Verify TemPoRAL manifest when needed
 if [ "$SKIP_TEMPORAL" -eq 0 ] && [ ! -f "$TEMPORAL_MANIFEST" ]; then
-    echo "  ❌ TemPoRAL manifest not found: $TEMPORAL_MANIFEST"
+    echo "  TemPoRAL manifest not found: $TEMPORAL_MANIFEST"
     echo "  Run MedSAM2_dataset_building.sh first (TemPoRAL preparation step)."
     exit 1
 fi
@@ -354,7 +354,7 @@ if [ "$SKIP_TEMPORAL" -eq 0 ]; then
 
     # 5a. GT oracle (uses RTStruct masks where available)
     full_pipeline "temporal_gt_zeroshot" \
-        "$TEMPORAL_DATA" "manifest.json" "validation" \
+        "$TEMPORAL_DATA" "manifest_79.json" "validation" \
         --bbox_mode gt --bbox_shift 5 --slice_pad 1
 
     # # 5b. PET base41 (scale-invariant, always available)
