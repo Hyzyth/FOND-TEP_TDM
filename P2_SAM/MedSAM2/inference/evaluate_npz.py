@@ -262,27 +262,38 @@ def _load_nifti(path: str):
 
 
 def _load_gt_swincross_npz(npz_path: str):
-    """SwinCross NPZ -> (label uint8, spacing_xyz).
-
-    label    : (R,A,S) uint8  - kept as-is; pred will be compared in same space
-    spacing  : orig_spacing (sx,sy,sz) ITK order
-    """
+    """SwinCross NPZ -> (label uint8, spacing_xyz, sitk.Image)."""
     with np.load(npz_path, allow_pickle=False) as npz:
         lbl = npz["label"].astype(np.uint8)
         spacing_xyz = tuple(float(s) for s in npz["orig_spacing"])
-    return lbl, spacing_xyz
+        
+        # SwinCross label is stored as (R,A,S). sitk expects (S,A,R)
+        lbl_sar = lbl.transpose(2, 1, 0) 
+        
+        img = sitk.GetImageFromArray(lbl_sar)
+        img.SetSpacing(spacing_xyz)
+        img.SetOrigin([float(x) for x in npz["orig_origin"]])
+        img.SetDirection([float(x) for x in npz["orig_direction"].flatten()])
+        
+    return lbl, spacing_xyz, img
 
 
 def _load_gt_temporal_npz(npz_path: str):
-    """TemPoRAL NPZ -> (gts uint8, spacing_xyz).
-
-    gts      : (D,H,W) uint8
-    spacing  : stored as (sz,sy,sx) -> converted to (sx,sy,sz) for sitk
-    """
+    """TemPoRAL NPZ -> (gts uint8, spacing_xyz, sitk.Image)."""
     with np.load(npz_path, allow_pickle=False) as npz:
         gts = npz["gts"].astype(np.uint8)
         sz, sy, sx = npz["spacing"]
-    return gts, (float(sx), float(sy), float(sz))
+        spacing_xyz = (float(sx), float(sy), float(sz))
+        
+        # Reconstruct the SimpleITK image using the metadata we added
+        img = sitk.GetImageFromArray(gts)
+        img.SetSpacing(spacing_xyz)
+        if "origin" in npz.files:
+            img.SetOrigin([float(x) for x in npz["origin"]])
+        if "direction" in npz.files:
+            img.SetDirection([float(x) for x in npz["direction"]])
+            
+    return gts, spacing_xyz, img
 
 
 def _load_gt_auto(path: str):
