@@ -309,11 +309,9 @@ def _load_gt_auto(path: str):
     with np.load(path, allow_pickle=False) as npz:
         keys = set(npz.files)
     if "label" in keys:
-        arr, sp = _load_gt_swincross_npz(path)
-        return arr, sp, None
+        return _load_gt_swincross_npz(path)
     if "gts" in keys:
-        arr, sp = _load_gt_temporal_npz(path)
-        return arr, sp, None
+        return _load_gt_temporal_npz(path)
     raise ValueError(f"Cannot determine GT format from {path}. Keys: {keys}")
 
 

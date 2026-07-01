@@ -422,11 +422,35 @@ for PRED_FULL in "$PRED_ROOT"/*/; do
     PRED_DIR=$(basename "$PRED_FULL")
     [[ "$PRED_DIR" == "logs" ]] && continue
     CSV="$PRED_FULL/per_case_evaluation_rich.csv"
+    
     if [ -f "$CSV" ]; then
-        MEAN_DICE=$(awk -F',' 'NR>1 && $13!="" {s+=$13; n++} END {if(n>0) printf "%.4f", s/n}' "$CSV")
-        MEAN_P=$(awk    -F',' 'NR>1 && $11!="" {s+=$11; n++} END {if(n>0) printf "%.4f", s/n}' "$CSV")
-        MEAN_N=$(awk    -F',' 'NR>1 && $12!="" {s+=$12; n++} END {if(n>0) printf "%.4f", s/n}' "$CSV")
-        echo "${PRED_DIR},${MEAN_DICE},${MEAN_P},${MEAN_N}" >> "$SUMMARY"
+        # Use Pandas to safely extract the exact MEAN row, ignoring CSV quoting issues
+        METRICS=$(python3.10 -c '
+import sys
+try:
+    import pandas as pd
+    df = pd.read_csv(sys.argv[1])
+    
+    # Grab the pre-calculated MEAN row, or calculate it if it is missing
+    if "MEAN" in df["case_id"].values:
+        row = df[df["case_id"] == "MEAN"].iloc[0]
+    else:
+        row = df.mean(numeric_only=True)
+    
+    def safe_fmt(val):
+        return "0.0000" if pd.isna(val) or val == "" else f"{float(val):.4f}"
+        
+    # FIX: Assign to variables first to avoid backslashes inside the f-string
+    md = safe_fmt(row.get("mean_dice"))
+    tp = safe_fmt(row.get("GTVp_dice"))
+    tn = safe_fmt(row.get("GTVn_dice"))
+    print(f"{md},{tp},{tn}")
+    
+except Exception:
+    print("0.0000,0.0000,0.0000")
+' "$CSV")
+        
+        echo "${PRED_DIR},${METRICS}" >> "$SUMMARY"
     fi
 done
 

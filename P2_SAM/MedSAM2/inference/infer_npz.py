@@ -192,43 +192,33 @@ def _load_temporal(path: str) -> dict:
     fmt         : 'temporal'
     """
     with np.load(path, allow_pickle=False) as npz:
-        ct_raw  = npz["ct_imgs"]                        # (D,H,W) uint8
-        pet_raw_u8 = npz["pet_imgs"]                    # (D,H,W) uint8
-        lbl_raw = npz["gts"].astype(np.uint8)           # (D,H,W)
-        spacing = npz["spacing"].copy()                  # (sz,sy,sx)
-        suv_max = (float(npz["pet_suv_max"])
-                   if "pet_suv_max" in npz.files else None)
+        ct_raw    = npz["ct_imgs"]
+        pet_raw_u8 = npz["pet_imgs"]
+        lbl_raw    = npz["gts"].astype(np.uint8)
+        spacing    = npz["spacing"].copy()
+        suv_max    = float(npz["pet_suv_max"]) if "pet_suv_max" in npz.files else None
+        
+        # Keep metadata to ensure physical placement is 1:1
+        meta = {
+            "spacing": spacing,
+            "z_min": int(npz.get("z_min", 0)),
+            "d_orig": int(npz.get("d_orig", ct_raw.shape[0])),
+            "origin": npz["origin"].copy() if "origin" in npz.files else None,
+            "direction": npz["direction"].copy() if "direction" in npz.files else None
+        }
 
-    ct_f  = _uint8_to_float(ct_raw)
-    pet_f = _uint8_to_float(pet_raw_u8)
+    # Transpose to match SwinCross [S, R, A]
+    ct_f  = np.transpose(ct_raw, (0, 2, 1)).astype(np.float32) / 255.0
+    pet_f = np.transpose(pet_raw_u8, (0, 2, 1)).astype(np.float32) / 255.0
+    lbl_s = np.transpose(lbl_raw, (0, 2, 1))
 
-    if suv_max is not None and suv_max > 0:
-        pet_raw_suv = pet_f * float(suv_max)
-    else:
-        pet_raw_suv = None
-
-    # Transpose A/P and R/L to match SwinCross (S, R, A)
-    ct_f = np.transpose(ct_f, (0, 2, 1))
-    pet_f = np.transpose(pet_f, (0, 2, 1))
-    lbl_raw = np.transpose(lbl_raw, (0, 2, 1))
-    if pet_raw_suv is not None:
-        pet_raw_suv = np.transpose(pet_raw_suv, (0, 2, 1))
-
-    D, W, H = ct_f.shape 
-    meta = {
-        "spacing": spacing, 
-        "pet_suv_max": suv_max,
-        "z_min": int(npz.get("z_min", 0)),
-        "d_orig": int(npz.get("d_orig", D)),
-        "origin": npz.get("origin"),
-        "direction": npz.get("direction")
-    }
-
-    # Transpose spacing tuple to match the swapped array
+    # Construct pet_raw for auto-prompter
+    pet_r = pet_f * suv_max if suv_max else None
+    
     spacing_mm = (float(spacing[0]), float(spacing[2]), float(spacing[1]))
-
-    return dict(ct_slices=ct_f, pet_slices=pet_f, pet_raw=pet_raw_suv,
-                lbl_slices=lbl_raw, S=D, R=W, A=H,
+    
+    return dict(ct_slices=ct_f, pet_slices=pet_f, pet_raw=pet_r,
+                lbl_slices=lbl_s, S=ct_f.shape[0], R=ct_f.shape[1], A=ct_f.shape[2],
                 spacing_mm=spacing_mm, meta=meta, fmt="temporal")
 
 
@@ -267,26 +257,31 @@ def _nifti_swincross(pred_sra: np.ndarray, meta: dict,
     sitk.WriteImage(r.Execute(sitk_img), out_path)
 
 
-def _nifti_temporal(pred_dwh: np.ndarray, spacing_mm: tuple, out_path: str, meta: dict):
+def _nifti_temporal(pred_sra: np.ndarray, spacing_mm: tuple, out_path: str, meta: dict):
+    # spacing_mm is (sz, sx, sy) - TemPoRAL native order
     sz, sx, sy = spacing_mm
     
-    # Transpose back to native (D, H, W) for standard NIfTI export
-    pred_dhw = np.transpose(pred_dwh, (0, 2, 1))
+    # 1. Un-transpose back to native (D, H, W)
+    pred_dhw = np.transpose(pred_sra, (0, 2, 1))
     
+    # 2. Uncrop along depth (Z) axis
     d_orig = meta.get("d_orig", pred_dhw.shape[0])
     z_min = meta.get("z_min", 0)
-
-    # Uncrop along depth (Z) axis
     full = np.zeros((d_orig, pred_dhw.shape[1], pred_dhw.shape[2]), dtype=np.uint8)
     full[z_min:z_min+pred_dhw.shape[0]] = pred_dhw
 
+    # 3. Create SITK image
     sitk_img = sitk.GetImageFromArray(full)
-    sitk_img.SetSpacing((float(sy), float(sx), float(sz))) 
     
+    # 4. USE the spacing_mm argument (Correcting mapping to ITK (x, y, z))
+    # TemPoRAL spacing is (sz, sy, sx). ITK expects (x, y, z) = (sx, sy, sz)
+    sitk_img.SetSpacing((float(sx), float(sy), float(sz))) 
+    
+    # 5. Apply physical placement metadata
     if meta.get("origin") is not None:
         sitk_img.SetOrigin([float(x) for x in meta["origin"]])
     if meta.get("direction") is not None:
-        sitk_img.SetDirection([float(x) for x in meta["direction"]])
+        sitk_img.SetDirection([float(x) for x in meta["direction"].flatten()])
 
     sitk.WriteImage(sitk_img, out_path)
 
@@ -376,6 +371,7 @@ def _to_tensor(ct_s: np.ndarray, pet_s: np.ndarray) -> torch.Tensor:
     S = ct_s.shape[0]
     out = np.empty((S, 3, MODEL_IMG_SIZE, MODEL_IMG_SIZE), dtype=np.float32)
     for i in range(S):
+        # Resizing to 512x512
         ct_r = np.array(
             Image.fromarray((ct_s[i]  * 255).astype(np.uint8))
                  .resize((MODEL_IMG_SIZE, MODEL_IMG_SIZE), Image.BILINEAR),
@@ -384,13 +380,13 @@ def _to_tensor(ct_s: np.ndarray, pet_s: np.ndarray) -> torch.Tensor:
             Image.fromarray((pet_s[i] * 255).astype(np.uint8))
                  .resize((MODEL_IMG_SIZE, MODEL_IMG_SIZE), Image.BILINEAR),
             dtype=np.float32) / 255.0
+
+        # Stack as [CT, PET, PET] exactly as in hecktor_dataset.py
         out[i, 0] = ct_r
         out[i, 1] = pet_r
-        out[i, 2] = pet_r
-    t    = torch.from_numpy(out)
-    mean = torch.tensor(IMG_MEAN)[:, None, None]
-    std  = torch.tensor(IMG_STD)[:, None, None]
-    return (t - mean) / std
+        out[i, 2] = pet_r  
+
+    return torch.from_numpy(out)
 
 
 # ── Overlay ────────────────────────────────────────────────────────────────────
@@ -460,6 +456,8 @@ def infer_one_case(npz_path: str, entry: dict, predictor,
     spacing_mm = d["spacing_mm"]   # tuple used for post-processing
     meta       = d["meta"]
     orig_hw    = (R, A)
+    print(f"DEBUG: {case_id} | CT range: {d['ct_slices'].min():.2f} to {d['ct_slices'].max():.2f}")
+    print(f"DEBUG: {case_id} | PET range: {d['pet_slices'].min():.2f} to {d['pet_slices'].max():.2f}")
 
     # ── SAM2 tensor ────────────────────────────────────────────────────────
     img_tensor = _to_tensor(ct_slices, pet_slices).cuda()
@@ -512,6 +510,7 @@ def infer_one_case(npz_path: str, entry: dict, predictor,
                     bbox2d = comp["bbox_2d"]
                 print(f"    comp={comp['component_id']}  key_z={key_z}  "
                       f"bbox={bbox2d.tolist()}  voxels={comp['voxel_count']}")
+                print(f"DEBUG: {case_id} | Prediction mask mean: {segs.mean():.6f}")
                 _propagate(predictor, img_tensor, R, A,
                            key_z, bbox2d, orig_hw, label_id, segs)
 
