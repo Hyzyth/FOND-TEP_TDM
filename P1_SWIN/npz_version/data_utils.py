@@ -90,7 +90,7 @@ class LoadLMDBd(Transform):
     """
     def __init__(self, lmdb_dir):
         self.lmdb_dir = lmdb_dir
-        self.env = None
+        self.env = lmdb.open(lmdb_dir, readonly=True, lock=False, readahead=False, meminit=False)
 
     def _init_env(self):
         if self.env is None:
