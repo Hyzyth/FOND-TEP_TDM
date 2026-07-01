@@ -39,16 +39,16 @@ set -e
 # ╚════════════════════════════════════════════════════════════════════════╝
 
 # ── 1. Execution Toggles (0=run, 1=skip) ──────────────────────────────────
-SKIP_GT_TEST=0          # GT oracle - locked test vault  (recommended first)
-SKIP_GT_TRAIN=0         # GT oracle - train pool overfit check
-SKIP_GT_VAL=0           # GT oracle - val pool overfit check
+SKIP_GT_TEST=1          # GT oracle - locked test vault  (recommended first)
+SKIP_GT_TRAIN=1         # GT oracle - train pool overfit check
+SKIP_GT_VAL=1           # GT oracle - val pool overfit check
 
 SKIP_PET=1              # PET auto-prompting - test vault
 SKIP_UNET=1             # UNet auto-prompting - test vault
 SKIP_HYBRID=1           # Hybrid auto-prompting - test vault
 
-SKIP_TEMPORAL=1         # TemPoRAL zero-shot inference
-SKIP_TP_STRAT=1         # Per-timepoint sub-reports for TemPoRAL
+SKIP_TEMPORAL=0         # TemPoRAL zero-shot inference
+SKIP_TP_STRAT=0         # Per-timepoint sub-reports for TemPoRAL
 
 # ── 2. Hardware & Paths ────────────────────────────────────────────────────
 GPU=0
@@ -223,6 +223,28 @@ temporal_sub_reports() {
             local N
             N=$(tail -n+2 "$SUB" | wc -l)
             echo "  ↳ $tp: $N cases -> $SUB"
+            
+            # ── NEW: Calculate and append the local MEAN row using Pandas ──
+            python3.10 -c '
+import sys
+try:
+    import pandas as pd
+    csv_path = sys.argv[1]
+    df = pd.read_csv(csv_path)
+    if len(df) > 0:
+        num_cols = df.select_dtypes(include=["float64", "int64"]).columns
+        mean_vals = df[num_cols].mean().round(4).to_dict()
+        mean_row = {c: "" for c in df.columns}
+        mean_row.update(mean_vals)
+        mean_row["case_id"] = "MEAN"
+        mean_row["patient"] = "ALL_CASES"
+        mean_row["comments"] = f"Average across {len(df)} cases"
+        pd.DataFrame([mean_row]).to_csv(csv_path, mode="a", header=False, index=False)
+except ImportError:
+    pass
+' "$SUB"
+            # ───────────────────────────────────────────────────────────────
+
             python3.10 "$PLOT_METRICS" \
                 --csv_path   "$SUB" \
                 --output_dir "$TARGET/plots_${tp}" > /dev/null 2>&1
@@ -354,8 +376,8 @@ if [ "$SKIP_TEMPORAL" -eq 0 ]; then
 
     # 5a. GT oracle (uses RTStruct masks where available)
     full_pipeline "temporal_gt_zeroshot" \
-        "$TEMPORAL_DATA" "manifest_79.json" "validation" \
-        --bbox_mode gt --bbox_shift 5 --slice_pad 1
+        "$TEMPORAL_DATA" "manifest.json" "validation" \
+        --bbox_mode gt --bbox_shift 0 --slice_pad 0
 
     # # 5b. PET base41 (scale-invariant, always available)
     # full_pipeline "temporal_pet_base41" \
@@ -385,8 +407,9 @@ if [ "$SKIP_TP_STRAT" -eq 0 ]; then
     echo "╔═════════════════════════════════════════════╗"
     echo "║  TemPoRAL Timepoint Stratification          ║"
     echo "╚═════════════════════════════════════════════╝"
-    for RUN in temporal_gt_zeroshot temporal_pet_base41 \
-               temporal_pet_nestle temporal_hybrid_base41; do
+    for RUN in temporal_gt_zeroshot;
+                # temporal_pet_base41 temporal_pet_nestle temporal_hybrid_base41; 
+               do
         [ -d "$PRED_ROOT/$RUN" ] && temporal_sub_reports "$RUN"
     done
 fi

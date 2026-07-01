@@ -285,15 +285,20 @@ def _load_gt_temporal_npz(npz_path: str):
         sz, sy, sx = npz["spacing"]
         spacing_xyz = (float(sx), float(sy), float(sz))
         
-        # Reconstruct the SimpleITK image using the metadata we added
-        img = sitk.GetImageFromArray(gts)
+        # Pad GT back to full volume to bypass resampling destruction
+        d_orig = int(npz.get("d_orig", gts.shape[0]))
+        z_min = int(npz.get("z_min", 0))
+        full_gts = np.zeros((d_orig, gts.shape[1], gts.shape[2]), dtype=np.uint8)
+        full_gts[z_min:z_min+gts.shape[0]] = gts
+        
+        img = sitk.GetImageFromArray(full_gts)
         img.SetSpacing(spacing_xyz)
         if "origin" in npz.files:
             img.SetOrigin([float(x) for x in npz["origin"]])
         if "direction" in npz.files:
             img.SetDirection([float(x) for x in npz["direction"]])
             
-    return gts, spacing_xyz, img
+    return full_gts, spacing_xyz, img
 
 
 def _load_gt_auto(path: str):

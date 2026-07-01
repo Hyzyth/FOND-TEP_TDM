@@ -202,13 +202,19 @@ def _load_temporal(path: str) -> dict:
     ct_f  = _uint8_to_float(ct_raw)
     pet_f = _uint8_to_float(pet_raw_u8)
 
-    # Reconstruct raw SUV for auto-prompting thresholding methods
     if suv_max is not None and suv_max > 0:
-        pet_raw_suv = pet_f * float(suv_max)   # ~ original SUV
+        pet_raw_suv = pet_f * float(suv_max)
     else:
-        pet_raw_suv = None   # base41 still works; nestle/black/daisne will warn
+        pet_raw_suv = None
 
-    D, H, W = ct_f.shape
+    # Transpose A/P and R/L to match SwinCross (S, R, A)
+    ct_f = np.transpose(ct_f, (0, 2, 1))
+    pet_f = np.transpose(pet_f, (0, 2, 1))
+    lbl_raw = np.transpose(lbl_raw, (0, 2, 1))
+    if pet_raw_suv is not None:
+        pet_raw_suv = np.transpose(pet_raw_suv, (0, 2, 1))
+
+    D, W, H = ct_f.shape 
     meta = {
         "spacing": spacing, 
         "pet_suv_max": suv_max,
@@ -218,12 +224,11 @@ def _load_temporal(path: str) -> dict:
         "direction": npz.get("direction")
     }
 
-    # spacing_mm in (sz,sy,sx) order - used directly for 3-D post-processing
-    # because the array axes are (D,H,W) = (z,y,x) in sitk convention
-    spacing_mm = tuple(float(s) for s in spacing)
+    # Transpose spacing tuple to match the swapped array
+    spacing_mm = (float(spacing[0]), float(spacing[2]), float(spacing[1]))
 
     return dict(ct_slices=ct_f, pet_slices=pet_f, pet_raw=pet_raw_suv,
-                lbl_slices=lbl_raw, S=D, R=H, A=W,
+                lbl_slices=lbl_raw, S=D, R=W, A=H,
                 spacing_mm=spacing_mm, meta=meta, fmt="temporal")
 
 
@@ -262,8 +267,12 @@ def _nifti_swincross(pred_sra: np.ndarray, meta: dict,
     sitk.WriteImage(r.Execute(sitk_img), out_path)
 
 
-def _nifti_temporal(pred_dhw: np.ndarray, spacing_mm: tuple, out_path: str, meta: dict):
-    sz, sy, sx = spacing_mm
+def _nifti_temporal(pred_dwh: np.ndarray, spacing_mm: tuple, out_path: str, meta: dict):
+    sz, sx, sy = spacing_mm
+    
+    # Transpose back to native (D, H, W) for standard NIfTI export
+    pred_dhw = np.transpose(pred_dwh, (0, 2, 1))
+    
     d_orig = meta.get("d_orig", pred_dhw.shape[0])
     z_min = meta.get("z_min", 0)
 
@@ -272,7 +281,7 @@ def _nifti_temporal(pred_dhw: np.ndarray, spacing_mm: tuple, out_path: str, meta
     full[z_min:z_min+pred_dhw.shape[0]] = pred_dhw
 
     sitk_img = sitk.GetImageFromArray(full)
-    sitk_img.SetSpacing((float(sx), float(sy), float(sz)))
+    sitk_img.SetSpacing((float(sy), float(sx), float(sz))) 
     
     if meta.get("origin") is not None:
         sitk_img.SetOrigin([float(x) for x in meta["origin"]])
