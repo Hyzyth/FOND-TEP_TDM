@@ -75,7 +75,7 @@ ln -sfn /data/ethan/MedSAM2/runs ./runs
 
 # ── 3. Shared SwinCross plot_metrics.py ───────────────────────────────────
 SWIN_DIR="../../P1_SWIN"
-PLOT_METRICS="${SWIN_DIR}/npz_version/plot_metrics.py"
+PLOT_METRICS="${SWIN_DIR}/adaptation/plot_metrics.py"
 
 # ── 4. Auto-prompting sweep config ────────────────────────────────────────
 PET_METHODS="base41 nestle black daisne"

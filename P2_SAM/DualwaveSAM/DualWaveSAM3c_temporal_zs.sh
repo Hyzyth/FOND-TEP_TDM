@@ -23,8 +23,8 @@ TARGET_NAME="temporal_zeroshot_vault"
 
 # Paths to the reused SwinCross evaluation scripts
 SWIN_DIR="../../P1_SWIN"
-EVAL_SCRIPT="${SWIN_DIR}/npz_version/evaluate_predictions.py"
-PLOT_METRICS_SCRIPT="${SWIN_DIR}/npz_version/plot_metrics.py"
+EVAL_SCRIPT="${SWIN_DIR}/adaptation/evaluate_predictions.py"
+PLOT_METRICS_SCRIPT="${SWIN_DIR}/adaptation/plot_metrics.py"
 
 # ── 2. Environment ─────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
