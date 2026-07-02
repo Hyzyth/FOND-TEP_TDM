@@ -11,9 +11,10 @@
 
 import os
 import torch
-import numpy as np
 from pathlib import Path
 import sys
+import numpy as np
+import nibabel as nib
 import SimpleITK as sitk
 from scipy import ndimage
 from monai.inferers.utils import sliding_window_inference # modification : changed import path as per VSCode suggestion monai.inferers -> monai.inferers.utils
@@ -25,9 +26,8 @@ import warnings
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_ROOT))
 
-from nii_version.data_utils import get_loader # Modification: Change the reference to the .py in the root with the code changes. Original version stays in utils folder
-from nii_version.trainer import dice
-
+from P1_SWIN.obsolete.nii_version.data_utils import get_loader # Modification: Change the reference to the .py in the root with the code changes. Original version stays in utils folder
+from P1_SWIN.obsolete.nii_version.trainer import dice
 from networks.SwinTransModels import CONFIGS as CONFIGS_sw_seg
 from networks.SwinTransModels import *
 
@@ -109,232 +109,86 @@ def count_objects(image, target_value=1):
     return num_features
 
 
-def create_prediction_sitk_from_monai_debug(
-    prediction_np,
-    original_image_path=None,
-    monai_affine=None,
-    spacing=(1.0, 1.0, 1.0)
-):
+def create_prediction_sitk_with_metadata(prediction_np, original_image_path, spacing=(1.0, 1.0, 1.0), monai_affine=None):
     """
-    =====================================================================================
-    CONVERSION MONAI (RAS) → SimpleITK (LPS) AVEC DEBUG COMPLET
-    =====================================================================================
-
-    CONTEXTE :
-    ----------
-    - MONAI travaille généralement en espace RAS (Right-Anterior-Superior)
-    - SimpleITK / DICOM utilisent LPS (Left-Posterior-Superior)
-    - Une conversion incorrecte produit un masque anatomiquement déplacé
-
-    OBJECTIF :
-    ----------
-    Transformer une prédiction MONAI (RAS + crop + resampling)
-    vers l’espace physique original du patient (LPS).
-
-    ÉTAPES :
-    --------
-    1) Créer image SITK en espace MONAI (RAS)
-    2) Convertir physiquement RAS → LPS
-    3) Charger image originale comme référence
-    4) Resampler pour alignement voxel parfait
-
-    PARAMÈTRES :
-    ------------
-    prediction_np : np.ndarray (Z,Y,X)
-        Masque prédit en espace MONAI
-
-    original_image_path : str
-        Chemin vers l’image originale (LPS)
-
-    monai_affine : np.ndarray (4x4)
-        Affine MONAI contenant origine + orientation + crop
-
-    spacing : tuple(float)
-        Spacing utilisé lors du preprocessing MONAI
-
-    RETOUR :
-    --------
-    sitk.Image alignée avec l’image originale
+    Create a SimpleITK image from prediction array and resample to original preprocessed data space.
+    
+    Strategy:
+    1. Read the original preprocessed 4D file (created by dataset_builder_simpleITK.py)
+    2. Extract CT channel as 3D reference (has original spacing, direction, origin)
+    3. Create prediction in MONAI's processed space (RAS, 1mm, with cropped origin)
+    4. Resample prediction to match original preprocessed file exactly
+    
+    This ensures predictions align with the original PET/CT merged files in data_dir.
+    
+    Args:
+        prediction_np: numpy array of predictions (3D, uint8) in (z, y, x) order
+        original_image_path: path to original 4D PET/CT preprocessed file
+        spacing: tuple of (space_x, space_y, space_z) used during MONAI preprocessing
+        monai_affine: 4x4 affine matrix from MONAI metadata (contains cropped origin)
+    
+    Returns:
+        sitk.Image: prediction image in original preprocessed file space
     """
-
-    print("\n" + "=" * 80)
-    print("🚀 START — MONAI → SITK LPS CONVERSION")
-    print("=" * 80)
-
-    # =========================================================================
-    # 0) INFOS SUR LE MASQUE ENTRÉE
-    # =========================================================================
-
-    print("\n[STEP 0] INPUT PREDICTION INFO")
-    print(f"• Shape (Z,Y,X) : {prediction_np.shape}")
-    print(f"• Data type     : {prediction_np.dtype}")
-    print(f"• Unique labels : {np.unique(prediction_np)}")
-
-    # =========================================================================
-    # 1) CRÉATION IMAGE SITK EN ESPACE MONAI (RAS)
-    # =========================================================================
-
-    print("\n[STEP 1] CREATE SITK IMAGE IN MONAI SPACE (RAS)")
-
-    # SimpleITK attend un tableau (Z,Y,X)
-    pred_sitk = sitk.GetImageFromArray(prediction_np.astype(np.uint8))
-
-    # Spacing isotropique généralement 1mm après preprocessing
-    pred_sitk.SetSpacing(spacing)
-
-    # Direction identité → axes alignés (RAS dans contexte MONAI)
-    direction_ras = (
-        1.0, 0.0, 0.0,
-        0.0, 1.0, 0.0,
-        0.0, 0.0, 1.0
-    )
-    pred_sitk.SetDirection(direction_ras)
-
-    print("• Spacing set to :", pred_sitk.GetSpacing())
-    print("• Direction (RAS):", pred_sitk.GetDirection())
-
-    # --- Origine issue de l’affine MONAI (IMPORTANT)
+    # Step 1: Create prediction in MONAI's processed space
+    prediction_sitk = sitk.GetImageFromArray(prediction_np)
+    prediction_sitk.SetSpacing(spacing)
+    prediction_sitk.SetDirection((1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0))  # RAS
+    
     if monai_affine is not None:
-        origin_ras = (
-            float(monai_affine[0, 3]),
-            float(monai_affine[1, 3]),
-            float(monai_affine[2, 3])
-        )
-        print("• Origin from MONAI affine (RAS):", origin_ras)
+        origin = (float(monai_affine[0, 3]), float(monai_affine[1, 3]), float(monai_affine[2, 3]))
+        prediction_sitk.SetOrigin(origin)
     else:
-        origin_ras = (0.0, 0.0, 0.0)
-        print("⚠️ No MONAI affine provided — using origin (0,0,0)")
-
-    pred_sitk.SetOrigin(origin_ras)
-
-    print("• Image size :", pred_sitk.GetSize())
-    print("• Origin     :", pred_sitk.GetOrigin())
-
-    # =========================================================================
-    # 2) CONVERSION PHYSIQUE RAS → LPS
-    # =========================================================================
-
-    print("\n[STEP 2] CONVERT RAS → LPS")
-
-    print("👉 Flipping X and Y axes")
-
-    # Flip axes X et Y (RAS → LPS)
-    flip_filter = sitk.FlipImageFilter()
-    flip_filter.SetFlipAxes([True, True, False])
-
-    pred_lps = flip_filter.Execute(pred_sitk)
-
-    # --- Correction de l’origine après flip
-    size = np.array(pred_sitk.GetSize())
-    spacing_np = np.array(pred_sitk.GetSpacing())
-    origin_np = np.array(origin_ras)
-
-    print("• Original size :", size)
-    print("• Original spacing :", spacing_np)
-
-    new_origin = origin_np.copy()
-
-    # Formule physique pour inversion d’axe
-    new_origin[0] = -origin_np[0] - spacing_np[0] * (size[0] - 1)
-    new_origin[1] = -origin_np[1] - spacing_np[1] * (size[1] - 1)
-
-    pred_lps.SetOrigin(tuple(new_origin))
-
-    print("• New origin (LPS):", pred_lps.GetOrigin())
-
-    # Direction identité → standard LPS
-    pred_lps.SetDirection(direction_ras)
-
-    print("• Direction (LPS):", pred_lps.GetDirection())
-    print("• Size after flip:", pred_lps.GetSize())
-
-    # =========================================================================
-    # 3) SI PAS D’IMAGE DE RÉFÉRENCE → FIN
-    # =========================================================================
-
+        prediction_sitk.SetOrigin((0.0, 0.0, 0.0))
+    
+    # Step 2: If no original file, return in MONAI space
     if original_image_path is None or not os.path.exists(original_image_path):
-        print("\n⚠️ No reference image provided — returning LPS prediction only")
-        print("=" * 80)
-        return pred_lps
-
-    # =========================================================================
-    # 4) CHARGEMENT IMAGE ORIGINALE (LPS)
-    # =========================================================================
-
-    print("\n[STEP 3] LOAD ORIGINAL IMAGE AS REFERENCE")
-    print("📂 Path:", original_image_path)
-
-    ref_img = sitk.ReadImage(original_image_path)
-
-    print("• Dimension :", ref_img.GetDimension())
-    print("• Size      :", ref_img.GetSize())
-    print("• Spacing   :", ref_img.GetSpacing())
-    print("• Origin    :", ref_img.GetOrigin())
-    print("• Direction :", ref_img.GetDirection())
-
-    # --- Gestion PET/CT 4D
-    if ref_img.GetDimension() == 4:
-        print("\n👉 4D image detected — extracting CT channel")
-
-        size4 = list(ref_img.GetSize())
-        size3 = [size4[0], size4[1], size4[2], 0]
+        print(f"⚠️ Original file not found, saving in MONAI space")
+        print(f"✅ Prediction: {prediction_sitk.GetSize()} @ {prediction_sitk.GetSpacing()}")
+        return prediction_sitk
+    
+    # Step 3: Read original preprocessed file and extract CT as reference
+    print(f"📂 Reading original: {original_image_path}")
+    original_image = sitk.ReadImage(original_image_path)
+    
+    if original_image.GetDimension() == 4:
+        # Extract CT channel (index 1) - PET is index 0
+        size_4d = list(original_image.GetSize())
+        size_3d = [size_4d[0], size_4d[1], size_4d[2], 0]  # 0 collapses 4th dim
         index_ct = [0, 0, 0, 1]
-
-        ref_img = sitk.Extract(ref_img, size3, index_ct)
-
-        print("• Extracted 3D size :", ref_img.GetSize())
-
-    # =========================================================================
-    # 5) RESAMPLING VERS L’IMAGE ORIGINALE
-    # =========================================================================
-
-    print("\n[STEP 4] RESAMPLE TO ORIGINAL IMAGE SPACE")
-
-    print("👉 Prediction before resampling:")
-    print("   Size     :", pred_lps.GetSize())
-    print("   Spacing  :", pred_lps.GetSpacing())
-    print("   Origin   :", pred_lps.GetOrigin())
-    print("   Direction:", pred_lps.GetDirection())
-
-    print("\n👉 Reference image:")
-    print("   Size     :", ref_img.GetSize())
-    print("   Spacing  :", ref_img.GetSpacing())
-    print("   Origin   :", ref_img.GetOrigin())
-    print("   Direction:", ref_img.GetDirection())
-
+        reference_3d = sitk.Extract(original_image, size_3d, index_ct)
+    else:
+        reference_3d = original_image
+    
+    print(f"🔍 Reference (original preprocessed CT):")
+    print(f"   Size: {reference_3d.GetSize()}")
+    print(f"   Spacing: {reference_3d.GetSpacing()}")
+    print(f"   Origin: {reference_3d.GetOrigin()}")
+    print(f"   Direction: {reference_3d.GetDirection()}")
+    
+    # Step 4: Resample prediction to match reference
+    print(f"📐 Resampling prediction to original space...")
+    print(f"   From: {prediction_sitk.GetSize()} @ {prediction_sitk.GetSpacing()} (MONAI RAS)")
+    print(f"   To:   {reference_3d.GetSize()} @ {reference_3d.GetSpacing()} (Original)")
+    
     resampler = sitk.ResampleImageFilter()
-
-    # Référence = image patient
-    resampler.SetReferenceImage(ref_img)
-
-    # Nearest neighbor indispensable pour masques
-    resampler.SetInterpolator(sitk.sitkNearestNeighbor)
-
-    # Valeur par défaut hors champ
+    resampler.SetReferenceImage(reference_3d)
+    resampler.SetInterpolator(sitk.sitkNearestNeighbor)  # Critical for segmentation masks
     resampler.SetDefaultPixelValue(0)
-
     resampler.SetOutputPixelType(sitk.sitkUInt8)
-
-    pred_resampled = resampler.Execute(pred_lps)
-
-    print("\n✅ RESAMPLING DONE")
-
-    print("👉 Final prediction:")
-    print("   Size     :", pred_resampled.GetSize())
-    print("   Spacing  :", pred_resampled.GetSpacing())
-    print("   Origin   :", pred_resampled.GetOrigin())
-    print("   Direction:", pred_resampled.GetDirection())
-
-    print("\n🏁 END — SUCCESS")
-    print("=" * 80)
-
-    return pred_resampled
-
+    resampler.SetTransform(sitk.Transform())  # Identity - rely on image metadata
+    
+    prediction_resampled = resampler.Execute(prediction_sitk)
+    
+    print(f"✅ Final: {prediction_resampled.GetSize()} @ {prediction_resampled.GetSpacing()}")
+    print(f"   Origin: {prediction_resampled.GetOrigin()}")
+    print(f"   Direction: {prediction_resampled.GetDirection()}")
+    
+    return prediction_resampled
 
 def main():
     args = parser.parse_args()
     args.test_mode = True
-    args.inference_only = args.inference_only # Flag de type d'inférence
     val_loader = get_loader(args)
     pretrained_dir = args.pretrained_dir
     output_dir = args.output_dir
@@ -373,7 +227,7 @@ def main():
         for i, batch in enumerate(val_loader):
 
             val_inputs = batch["image"].to(device)
-            val_labels = batch["label"].to(device) if not args.inference_only else None # If inference only, we do not need 'label's, it even doesn't exist...
+            val_labels = batch["label"].to(device)
             
             #this was here before my changes
             #val_inputs = val_inputs[:,1,:,:,:]
@@ -395,43 +249,36 @@ def main():
 
             img_prefix = img_name.split('.')[0]
 
-            print("Debug : Before inference on case {}".format(img_name))
+            #print("Inference on case {}".format(img_name))
             val_outputs = sliding_window_inference(val_inputs,
                                                    (96, 96, 96), #remember this line if an error in inference occurs with img size changed
                                                    4,
                                                    model,
                                                    overlap=args.infer_overlap)
-            print("Debug : After inference on case {}".format(img_name))
             val_outputs = torch.softmax(val_outputs, 1).cpu().numpy()
             val_outputs = np.argmax(val_outputs, axis=1).astype(np.uint8)
+            val_labels = val_labels.cpu().numpy()[:, 0, :, :, :]
 
+            tumor_volume = np.sum(np.sum(np.sum(val_labels)))
+            #count number of tumors
+            #box, label, count = cv.detect_common_objects(tumor_volume)
 
-            if not args.inference_only:
-                val_labels = val_labels.cpu().numpy()[:, 0, :, :, :]
+            #_, thresh = cv2.threshold(val_labels, 0, 1, cv2.THRESH_BINARY_INV)
+            #kernal = np.ones((2, 2), np.uint8)
+            #dilation = cv2.dilate(thresh, kernal, iterations=2)
+            #contours, hierarchy = cv2.findContours(
+            #    dilation, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            #objects = str(len(contours))
+            print("number of tumors",count_objects(val_labels[0,:,:,:]))
 
-                tumor_volume = np.sum(np.sum(np.sum(val_labels)))
-                #count number of tumors
-                #box, label, count = cv.detect_common_objects(tumor_volume)
-
-                #_, thresh = cv2.threshold(val_labels, 0, 1, cv2.THRESH_BINARY_INV)
-                #kernal = np.ones((2, 2), np.uint8)
-                #dilation = cv2.dilate(thresh, kernal, iterations=2)
-                #contours, hierarchy = cv2.findContours(
-                #    dilation, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                #objects = str(len(contours))
-                print("number of tumors",count_objects(val_labels[0,:,:,:]))
-
-                #print("tumor volume: {}".format(tumor_volume))
-                dice_list_sub = []
-                for i in range(1, 2):
-                    organ_Dice = dice(val_outputs[0] == i, val_labels[0] == i)
-                    dice_list_sub.append(organ_Dice)
-                mean_dice = np.mean(dice_list_sub)
-                print("ImageName, Mean Organ Dice, and Tumor Volume: {}, {}, {}".format(img_name,mean_dice,tumor_volume))
-                dice_list_case.append(mean_dice)
-            else:
-                mean_dice = None
-                print(f"ImageName: {img_name} (Inference only)")
+            #print("tumor volume: {}".format(tumor_volume))
+            dice_list_sub = []
+            for i in range(1, 2):
+                organ_Dice = dice(val_outputs[0] == i, val_labels[0] == i)
+                dice_list_sub.append(organ_Dice)
+            mean_dice = np.mean(dice_list_sub)
+            print("ImageName, Mean Organ Dice, and Tumor Volume: {}, {}, {}".format(img_name,mean_dice,tumor_volume))
+            dice_list_case.append(mean_dice)
 
             # SAVE NIFTI FILES with SimpleITK
             #####################
@@ -455,7 +302,7 @@ def main():
                 print(f"📂 Original file path: {original_image_path}")
 
             # Create prediction SITK image resampled to original preprocessed file space
-            prediction_sitk = create_prediction_sitk_from_monai_debug(
+            prediction_sitk = create_prediction_sitk_with_metadata(
                 prediction_np=val_outputs_np,
                 original_image_path=original_image_path,
                 spacing=(args.space_x, args.space_y, args.space_z),
@@ -484,8 +331,8 @@ def main():
             # sitk.WriteImage(ct_sitk, os.path.join(test_output_dir, f'{img_prefix}_CT_monai.nii.gz'))
             
             #####################
-        if not args.inference_only:
-            print("Overall Mean Dice: {}".format(np.mean(dice_list_case)))
+
+        print("Overall Mean Dice: {}".format(np.mean(dice_list_case)))
 
 if __name__ == '__main__':
 

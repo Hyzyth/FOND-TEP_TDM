@@ -25,7 +25,7 @@ from monai.data import MetaTensor, decollate_batch
 from monai.inferers.utils import sliding_window_inference
 from monai.transforms import Invertd, RemoveSmallObjects
 from skimage.segmentation import clear_border
-from data_utils import get_loader
+from P1_SWIN.obsolete.nii_version.data_utils import get_loader
 
 # Safeguard
 PROJECT_ROOT = Path(__file__).resolve().parent.parent

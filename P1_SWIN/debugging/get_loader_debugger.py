@@ -1,16 +1,12 @@
 import os
 import torch
 import numpy as np
-import monai
 import nibabel as nib
 from monai.transforms import (
     Compose, LoadImaged, EnsureChannelFirstd, Orientationd, Spacingd,
     CropForegroundd, RandCropByPosNegLabeld, RandFlipd, RandRotate90d,
-    RandScaleIntensityd, RandShiftIntensityd, Lambdad, ToTensord
+    RandScaleIntensityd, RandShiftIntensityd, Lambdad
 )
-from monai.utils import first
-import matplotlib.pyplot as plt
-import SimpleITK as sitk
 
 # ================= CONFIGURATION SIMULÉE =================
 class MockArgs:

@@ -67,7 +67,7 @@ ensure_lmdb() {
 
     if [ ! -d "$EXPECTED_LMDB" ]; then
         echo "  [INFO] LMDB cache missing for $JSON_NAME. Building now..."
-        python3.12 npz_version/build_lmdb_cache.py \
+        python3.12 adaptation/build_lmdb_cache.py \
             --data_dir "$PPDATA_FOLDER" \
             --json_list "$JSON_NAME" \
             --out_dir "$LMDB_DIR"
@@ -92,7 +92,7 @@ if [ "$RUN_CLASSIC_TRAIN" = true ]; then
     
     CUDA_VISIBLE_DEVICES=$GPU \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    python3.12 -u npz_version/train.py \
+    python3.12 -u adaptation/train.py \
         --data_dir   $PPDATA_FOLDER \
         --lmdb_dir   $LMDB_DIR \
         --logdir     $CLASSIC_MODEL_DIR \
@@ -115,7 +115,7 @@ if [ "$RUN_CLASSIC_RESUME" = true ]; then
     echo "  ▶ Resuming Classic Training from model_last.pth."
     CUDA_VISIBLE_DEVICES=$GPU \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    python3.12 -u npz_version/train.py \
+    python3.12 -u adaptation/train.py \
         --data_dir        $PPDATA_FOLDER \
         --lmdb_dir        $LMDB_DIR \
         --json_list       ${JSON_PREFIX}_classic.json \
@@ -157,7 +157,7 @@ if [ "$RUN_KFOLD_TRAIN" = true ]; then
         echo "  ▶ Running Fold ${fold} / $((K_FOLDS - 1))"
         CUDA_VISIBLE_DEVICES=$GPU \
         PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-        python3.12 -u npz_version/train.py \
+        python3.12 -u adaptation/train.py \
             --data_dir      $PPDATA_FOLDER \
             --lmdb_dir      $LMDB_DIR \
             --logdir        $MODEL_DIR \
@@ -190,7 +190,7 @@ if [ "$RUN_KFOLD_PRODUCTION_FULL" = true ]; then
     
     CUDA_VISIBLE_DEVICES=$GPU \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    python3.12 -u npz_version/train.py \
+    python3.12 -u adaptation/train.py \
         --data_dir      $PPDATA_FOLDER \
         --lmdb_dir      $LMDB_DIR \
         --logdir        $FULL_MODEL_DIR \

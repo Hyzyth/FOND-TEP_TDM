@@ -31,12 +31,12 @@ from monai.utils.enums import MetricReduction
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_ROOT))
 
-from data_utils import get_loader
+from P1_SWIN.obsolete.nii_version.data_utils import get_loader
 from networks.SwinTransModels import CONFIGS as CONFIGS_sw_seg
 from networks.SwinTransModels import *
 from networks.unetr import UNETR
 from optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
-from trainer import run_training
+from P1_SWIN.obsolete.nii_version.trainer import run_training
 
 
 #max époque, cache rate et warmum époque à spécifier en shell pour test soft

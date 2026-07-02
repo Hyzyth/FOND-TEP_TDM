@@ -80,7 +80,7 @@ run_single_inference() {
     mkdir -p "$OUT_DIR"
 
     echo " [1/3] Running Inference with model: $CLASSIC_MODEL_DIR/$CLASSIC_WEIGHTS."
-    CUDA_VISIBLE_DEVICES=$GPU python3.12 npz_version/test.py \
+    CUDA_VISIBLE_DEVICES=$GPU python3.12 adaptation/test.py \
         --pretrained_dir "./runs/$CLASSIC_MODEL_DIR" \
         --pretrained_model_name "$CLASSIC_WEIGHTS" \
         --output_dir "$OUT_DIR" \
@@ -92,19 +92,19 @@ run_single_inference() {
         2>&1 | tee "$OUT_DIR/inference.log"
 
     echo " [2/3] Running Evaluation."
-    CUDA_VISIBLE_DEVICES=$GPU python3.12 npz_version/evaluate_predictions.py \
+    CUDA_VISIBLE_DEVICES=$GPU python3.12 adaptation/evaluate_predictions.py \
         --data_dir "$DATA_DIR" \
         --json_list "$JSON_FILE" \
         --output_dir "$OUT_DIR" \
         2>&1 | tee "$OUT_DIR/evaluation.log"
 
     echo " [3/3] Generating Metrics & Post-Processing Plots"
-    python3.12 npz_version/plot_metrics.py \
+    python3.12 adaptation/plot_metrics.py \
         --csv_path "$OUT_DIR/per_case_evaluation_rich.csv" \
         --output_dir "$OUT_DIR/plots"
     
     if [ -f "$OUT_DIR/postprocessing_logs.csv" ]; then
-        python3.12 npz_version/plot_postprocessing.py \
+        python3.12 adaptation/plot_postprocessing.py \
             --csv_path "$OUT_DIR/postprocessing_logs.csv" \
             --output_dir "$OUT_DIR/plots"
     fi
@@ -134,7 +134,7 @@ run_kfold_ensemble() {
         FOLD_DIRS="$FOLD_DIRS $FOLD_OUT"
 
         echo "      ↳ Inferring Fold $fold."
-        CUDA_VISIBLE_DEVICES=$GPU python3.12 npz_version/test.py \
+        CUDA_VISIBLE_DEVICES=$GPU python3.12 adaptation/test.py \
             --pretrained_dir "./runs/$FOLD_MODEL_DIR" \
             --pretrained_model_name "model_best.pth" \
             --output_dir "$FOLD_OUT" \
@@ -147,7 +147,7 @@ run_kfold_ensemble() {
         
         # Generate post-processing plots for this specific fold if the log exists
         if [ -f "$FOLD_OUT/postprocessing_logs.csv" ]; then
-            python3.12 npz_version/plot_postprocessing.py \
+            python3.12 adaptation/plot_postprocessing.py \
                 --csv_path "$FOLD_OUT/postprocessing_logs.csv" \
                 --output_dir "$FOLD_OUT/plots" > /dev/null 2>&1
         fi
@@ -155,7 +155,7 @@ run_kfold_ensemble() {
 
     # 2. Ensemble majority vote
     echo " [2/4] Running Majority-Vote Ensemble."
-    python3.12 npz_version/ensemble_kfold_predictions.py \
+    python3.12 adaptation/ensemble_kfold_predictions.py \
         --fold_dirs $FOLD_DIRS \
         --output_dir "$ENSEMBLE_OUT" \
         --data_dir "$DATA_DIR" \
@@ -164,7 +164,7 @@ run_kfold_ensemble() {
 
     # 3. Evaluate Ensemble
     echo " [3/4] Evaluating Ensemble."
-    CUDA_VISIBLE_DEVICES=$GPU python3.12 npz_version/evaluate_predictions.py \
+    CUDA_VISIBLE_DEVICES=$GPU python3.12 adaptation/evaluate_predictions.py \
         --data_dir "$DATA_DIR" \
         --json_list "$JSON_FILE" \
         --output_dir "$ENSEMBLE_OUT" \
@@ -172,13 +172,13 @@ run_kfold_ensemble() {
     
     # 4. Plot Ensemble Metrics
     echo " [4/4] Generating Ensemble Plots."
-    python3.12 npz_version/plot_metrics.py \
+    python3.12 adaptation/plot_metrics.py \
         --csv_path "$ENSEMBLE_OUT/per_case_evaluation_rich.csv" \
         --output_dir "$ENSEMBLE_OUT/plots"
     
     # If the ensemble script generates its own post-processing logs, plot them
     if [ -f "$ENSEMBLE_OUT/postprocessing_logs.csv" ]; then
-        python3.12 npz_version/plot_postprocessing.py \
+        python3.12 adaptation/plot_postprocessing.py \
             --csv_path "$ENSEMBLE_OUT/postprocessing_logs.csv" \
             --output_dir "$ENSEMBLE_OUT/plots"
     fi
@@ -209,7 +209,7 @@ generate_temporal_sub_reports() {
                 echo "  ↳ $tp: $N cases → $SUB_CSV"
                 
                 # We pipe plotting output to /dev/null to avoid cluttering the terminal
-                python3.12 npz_version/plot_metrics.py \
+                python3.12 adaptation/plot_metrics.py \
                     --csv_path   "$SUB_CSV" \
                     --output_dir "$TARGET_DIR/plots_${tp}" > /dev/null 2>&1
             done

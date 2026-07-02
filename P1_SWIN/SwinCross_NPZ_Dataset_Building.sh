@@ -56,7 +56,7 @@ if [ "$BUILD_HECKTOR_2025" = true ]; then
     echo "║  HECKTOR 2025 → SwinCross NPZ    ║"
     echo "╚══════════════════════════════════╝"
     mkdir -p $OUT_2025
-    python3.12 npz_version/prepare_hecktor_npz_swincross.py \
+    python3.12 adaptation/prepare_hecktor_npz_swincross.py \
         --data_dir   $DATA_2025 \
         --output_dir $OUT_2025 \
         --json_name  dataset_swincross.json \
@@ -72,7 +72,7 @@ if [ "$BUILD_HECKTOR_2026_KFOLD" = true ]; then
     echo "║  HECKTOR 2026 → SwinCross k-fold NPZ build      ║"
     echo "╚═════════════════════════════════════════════════╝"
     mkdir -p $OUT_2026
-    python3.12 npz_version/prepare_hecktor2026_kfold_npz.py \
+    python3.12 adaptation/prepare_hecktor2026_kfold_npz.py \
         --data_dir    "$DATA_2026" \
         --output_dir  $OUT_2026 \
         --train_ratio $TRAIN_RATIO \
@@ -89,7 +89,7 @@ if [ "$BUILD_TEMPORAL" = true ]; then
     echo "║  TemPoRAL → SwinCross NPZ build      ║"
     echo "╚══════════════════════════════════════╝"
     mkdir -p $OUT_TEMPORAL
-    python3.12 npz_version/prepare_temporal_npz_swincross.py \
+    python3.12 adaptation/prepare_temporal_npz_swincross.py \
         --input_folder  $DATA_TEMPORAL \
         --output_folder $OUT_TEMPORAL \
         --json_name     dataset_swincross_temporal.json \

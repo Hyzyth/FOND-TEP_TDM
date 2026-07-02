@@ -14,7 +14,6 @@ import math
 import numpy as np
 import torch
 from monai import transforms, data
-from monai.data.thread_buffer import ThreadDataLoader  # MODIFICATION > added for faster data loading
 from monai.data.decathlon_datalist import load_decathlon_datalist #Adjusted import path as per VSCode suggestion monai.data -> monai.data.decathlon_datalist
 import torch
 
