@@ -1,6 +1,5 @@
 import SimpleITK as sitk
 import numpy as np
-import torch
 from pathlib import Path
 import sys
 import os
@@ -14,9 +13,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_ROOT))
 
 # Import de tes anciennes fonctions de bricolage
-from nii_version.test import create_prediction_sitk_with_metadata
-from ipynb_checkpoints.test_v2 import create_prediction_sitk_from_monai_debug
-from ipynb_checkpoints.test_old import create_prediction_sitk_with_metadata as create_prediction_sitk_with_metadata_old
+from P1_SWIN.obsolete.nii_version.test import create_prediction_sitk_with_metadata
+from P1_SWIN.obsolete.test_v2 import create_prediction_sitk_from_monai_debug
+from P1_SWIN.obsolete.test_old import create_prediction_sitk_with_metadata as create_prediction_sitk_with_metadata_old
 
 # ============================================================
 # 🔧 PARAMÈTRES — à adapter
