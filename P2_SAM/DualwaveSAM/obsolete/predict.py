@@ -11,8 +11,8 @@ from torch.utils.data import Dataset, DataLoader
 from tqdm import trange
 
 import argparse
-import ex_transforms
-import metrics
+import P2_SAM.DualwaveSAM.obsolete.ex_transforms as ex_transforms
+import P2_SAM.DualwaveSAM.obsolete.metrics as metrics
 
 # CHANGE: medpy hd95 is the only metric used here; import directly
 from medpy.metric.binary import hd95

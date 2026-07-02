@@ -28,9 +28,9 @@ from medpy.metric.binary import hd95
 # =========================
 # Local module imports
 # =========================
-import ex_transforms
-import losses
-import metrics
+import P2_SAM.DualwaveSAM.obsolete.ex_transforms as ex_transforms
+import P2_SAM.DualwaveSAM.obsolete.losses as losses
+import P2_SAM.DualwaveSAM.obsolete.metrics as metrics
 
 warnings.filterwarnings("ignore")
 
