@@ -22,7 +22,7 @@ WEIGHTS="model_last.pth"
 TARGET_NAME="temporal_zeroshot_vault"
 
 # Paths to the reused SwinCross evaluation scripts
-SWIN_DIR="../../P1_SWIN"
+SWIN_DIR="../swincross"
 EVAL_SCRIPT="${SWIN_DIR}/adaptation/evaluate_predictions.py"
 PLOT_METRICS_SCRIPT="${SWIN_DIR}/adaptation/plot_metrics.py"
 

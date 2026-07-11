@@ -74,7 +74,7 @@ mkdir -p /data/ethan/MedSAM2/runs
 ln -sfn /data/ethan/MedSAM2/runs ./runs
 
 # ── 3. Shared SwinCross plot_metrics.py ───────────────────────────────────
-SWIN_DIR="../../P1_SWIN"
+SWIN_DIR="../swincross"
 PLOT_METRICS="${SWIN_DIR}/adaptation/plot_metrics.py"
 
 # ── 4. Auto-prompting sweep config ────────────────────────────────────────

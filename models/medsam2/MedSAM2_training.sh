@@ -70,7 +70,7 @@ ln -sfn "$RUNS_ROOT" ./runs
 # Verify prerequisites
 if [ ! -f "$SWINCROSS_NPZ_ROOT/$CLASSIC_JSON" ]; then
     echo "  JSON not found: $SWINCROSS_NPZ_ROOT/$CLASSIC_JSON"
-    echo "  Run P1_SWIN/SwinCross_NPZ_Dataset_Building.sh first."
+    echo "  Run models/swincross/SwinCross_NPZ_Dataset_Building.sh first."
     exit 1
 fi
 

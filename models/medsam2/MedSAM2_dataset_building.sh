@@ -10,7 +10,7 @@
 #
 # Prerequisites
 # -------------
-#   Run P1_SWIN/SwinCross_NPZ_Dataset_Building.sh with BUILD_HECKTOR_2026_KFOLD=true
+#   Run models/swincross/SwinCross_NPZ_Dataset_Building.sh with BUILD_HECKTOR_2026_KFOLD=true
 #   BEFORE this script. 
 #
 # This script's responsibilities
@@ -80,7 +80,7 @@ if [ ! -d "$SWINCROSS_NPZ_ROOT" ]; then
     echo ""
     echo "  SwinCross NPZ root not found: $SWINCROSS_NPZ_ROOT"
     echo ""
-    echo "  Run P1_SWIN/SwinCross_NPZ_Dataset_Building.sh first with:"
+    echo "  Run models/swincross/SwinCross_NPZ_Dataset_Building.sh first with:"
     echo "    BUILD_HECKTOR_2026_KFOLD=true"
     echo ""
     exit 1

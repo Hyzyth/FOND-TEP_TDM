@@ -74,7 +74,7 @@ NPZ_DIR="${SWINCROSS_NPZ_ROOT}/npz/train"   # val cases also reside here
 # Verify
 if [ ! -d "$NPZ_DIR" ]; then
     echo "  SwinCross NPZ directory not found: $NPZ_DIR"
-    echo "  Run P1_SWIN/SwinCross_NPZ_Dataset_Building.sh first."
+    echo "  Run models/swincross/SwinCross_NPZ_Dataset_Building.sh first."
     exit 1
 fi
 

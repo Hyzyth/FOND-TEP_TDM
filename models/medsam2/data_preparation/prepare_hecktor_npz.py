@@ -4,7 +4,7 @@ prepare_hecktor_npz.py
 ** DEPRECATED - No longer used for MedSAM2 training or inference. **
 
 As of 2026-06, MedSAM2 reads directly from the SwinCross-format NPZ files
-produced by P1_SWIN/npz_version/prepare_hecktor2026_kfold_npz.py.
+produced by models/swincross/npz_version/prepare_hecktor2026_kfold_npz.py.
 
 The SwinCross pipeline generates:
   - ct    (R, A, S) int16   - CT in HU
@@ -14,7 +14,7 @@ The SwinCross pipeline generates:
   - per-fold JSON split files compatible with all three models
 
 Run this instead:
-    cd P1_SWIN
+    cd models/swincross
     bash SwinCross_NPZ_Dataset_Building.sh  # BUILD_HECKTOR_2026_KFOLD=true
 
 This file is kept only for historical reference and is NOT called by any
@@ -230,7 +230,7 @@ def main(args: argparse.Namespace) -> None:
     warnings.warn(
         "prepare_hecktor_npz.py is DEPRECATED. "
         "MedSAM2 now reads SwinCross-format NPZ files directly. "
-        "Run P1_SWIN/SwinCross_NPZ_Dataset_Building.sh instead.",
+        "Run models/swincross/SwinCross_NPZ_Dataset_Building.sh instead.",
         DeprecationWarning,
         stacklevel=2,
     )

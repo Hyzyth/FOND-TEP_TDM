@@ -3,7 +3,7 @@ lr_scheduler.py  —  Learning rate schedulers for DualwaveSAM
 =============================================================
 Inlined from SwinCross/optimizers/lr_scheduler.py so that the
 DualwaveSAM project is fully self-contained without importing
-from the P1_SWIN source tree.
+from the models/swincross source tree.
 """
 
 import math

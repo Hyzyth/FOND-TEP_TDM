@@ -1,0 +1,48 @@
+# ── Python ───────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.ipynb_checkpoints/
+
+# ── Virtual environments (each model creates its own) ────────────────────
+*_env/
+.venv/
+venv/
+env/
+
+# ── Compiled / native extensions (rebuild via setup.py) ──────────────────
+*.so
+*.o
+
+# ── Model weights & checkpoints (download / retrain instead) ─────────────
+*.pt
+*.pth
+checkpoints/
+pretrained_models/
+
+# ── Generated data & experiment outputs ──────────────────────────────────
+*.npz
+*.nii
+*.nii.gz
+*.lmdb
+lmdb_cache/
+*_LMDB_cache/
+runs/
+exp_log/
+*.log
+postprocessing_logs.csv
+
+# ── OS / editor cruft ────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# NOTE: large reference PDFs currently live in docs/. They are tracked on
+# purpose. If repo size becomes an issue, move them to Git LFS or keep only
+# docs/BIBLIOGRAPHY.md and un-ignore nothing here.

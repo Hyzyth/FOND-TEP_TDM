@@ -60,7 +60,7 @@ KFOLD_BASE_DIR="DualwaveSAM3c_kfold_100ep"
 K_FOLDS=5
 
 # ── 7. SwinCross evaluation scripts (reused as-is) ─────────────────────────
-SWIN_DIR="../../P1_SWIN"   # relative to DualwaveSAM root
+SWIN_DIR="../swincross"   # relative to DualwaveSAM root
 EVAL_SCRIPT="${SWIN_DIR}/adaptation/evaluate_predictions.py"
 PLOT_METRICS_SCRIPT="${SWIN_DIR}/adaptation/plot_metrics.py"
 
