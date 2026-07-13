@@ -1,4 +1,4 @@
-# StageM1_IA — FOND-TEP/TDM
+# Master 1 Internship — FOND-TEP/TDM
 
 **Foundation models for head-and-neck tumour segmentation in PET/CT.**
 
